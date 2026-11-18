@@ -79,7 +79,9 @@ Keep photo access URLs private. See [credential protection](../SECURITY.md) for 
 
 ## 3. Prepare Komoot summaries
 
-Preparation uses local summary text. It does not call a model or translate text.
+German (`de`) is the default summary language.
+Use `--language en`, `fr`, `es` or another language tag on `summaries` and `prepare` to select a different language.
+Drafting and preparation stay offline. [Automatic generation](#automatic-summaries) requires `summaries --generate`.
 When a matching preparation or usable POI summaries are already cached, run:
 
 ```bash
@@ -92,8 +94,8 @@ For missing or replacement summaries, generate an input file for one stage:
 hexatrek summaries --stage 1 --output ./data/stage-01-summaries.json
 ```
 
-The command records the active snapshot's exact manifest hash and unique route POI IDs.
-It retains existing summaries and uses `null` for missing text.
+The command records the active snapshot's exact manifest hash, selected `summary_language` and unique route POI IDs.
+It retains cached summaries in the selected language and uses `null` for missing text.
 It leaves unrelated POIs out of the file.
 Existing output files, including symlinks, are not overwritten.
 Write drafts outside managed `data/stages/` and public `exports/` directories.
@@ -110,6 +112,7 @@ The generated file uses this format after editing:
 ```json
 {
   "schema_version": 1,
+  "summary_language": "de",
   "source_manifest_sha256": "<SHA-256 written by the summaries command>",
   "summaries": {
     "1:1:42": "Quelle\n2026-11-10: Wasser gemeldet, ungeprüft."
@@ -124,13 +127,18 @@ One summary file applies to one stage. Run separate commands when supplying file
 
 Preparation reports all missing, unknown and invalid summaries together. Shared route POIs do not repeat the same error.
 Checks include text types, valid XML characters and the 250 UTF-16-unit limit.
-Malformed JSON, duplicate keys, unsupported schemas and mismatched source hashes stop validation before text checks.
-The exporter writes supplied text without truncation or translation.
+Malformed JSON, duplicate keys, unsupported schemas and mismatched source hashes or languages stop validation before text checks.
+Preparation writes supplied text without truncation or translation.
 Review its factual content, language, dates, closures, water uncertainty and conflicting reports.
 
 Changing the summary file changes the preparation recipe.
 Repeating the same validated input reuses the matching preparation.
 Source manifests and original comments remain unchanged.
+
+Unlabelled summary files, source summaries and preparations use German.
+Preparations are cached separately by language. German text is not reused for another language.
+`export` uses the active preparation; preparing another language selects it for the next export.
+Source names, full comments and fixed export labels keep their original language.
 
 You can instead adopt an existing preparation that matches the active source manifest hash:
 
@@ -145,6 +153,35 @@ Routes with more than 512 named POIs split into adjoining Komoot sections.
 Sections share boundary track points, and each original POI occurs once at its source position.
 Photos stay out of preparations by default.
 Use `prepare --include-photos` with a files-mode snapshot for offline photos.
+
+### Automatic summaries
+
+Choose an OpenAI-compatible Chat Completions endpoint with JSON-object response support and a model it serves:
+
+```bash
+hexatrek summaries --stage 1 --generate --language en \
+  --api-base http://localhost:11434/v1 --model your-model \
+  --output ./data/stage-01-summaries-en.json
+hexatrek prepare --stage 1 --language en \
+  --summaries-file ./data/stage-01-summaries-en.json
+hexatrek export --stage 1 --target osmand,komoot
+```
+
+Replace `your-model` with your model name. Omit `--language` for German.
+The API base can use HTTPS, or HTTP on `localhost`, `127.0.0.1` or `::1`.
+No endpoint or model is selected implicitly.
+Set `HEXATREK_API_BASE` and `HEXATREK_MODEL` instead of repeating the corresponding flags.
+For providers that require authentication, set `HEXATREK_API_KEY` as described in [credential protection](../SECURITY.md#model-credentials).
+
+The model receives POI names, types, descriptions and complete reports with dates.
+It generates missing or invalid text in batches of ten POIs.
+Valid cached text, including an intentional blank, stays unchanged.
+Matching prepared text in the selected language is reused without model requests, even when another language is active.
+
+Every response must contain exactly the requested POI IDs and valid text within 250 UTF-16 units.
+Refusals, incomplete replies and provider errors abort generation. There are no automatic retries or silent truncation.
+The output file is written only after all batches pass validation.
+Existing output files are never overwritten.
 
 ## 4. Export local GPXs
 

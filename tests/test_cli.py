@@ -3,9 +3,11 @@
 import hashlib
 import json
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
+from threading import Thread
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -62,6 +64,11 @@ def test_cli_missing_manifest_is_stderr_failure(tmp_path, capsys):
     (["summaries", "--stage", "1"], "--output"),
     (["summaries", "--stage", "1", "2", "--output", "/not/written"], "unrecognized arguments"),
     (["status", "--format", "yaml"], "invalid choice"),
+    (["prepare", "--stage", "1", "--language", "not a language"], "language"),
+    (["summaries", "--stage", "1", "--output", "/not/written", "--language", "../de"], "language"),
+    (["prepare", "--stage", "1", "--generate"], "unrecognized arguments"),
+    (["summaries", "--stage", "1", "--output", "/not/written", "--api-key", "secret"],
+     "unrecognized arguments"),
     (["summaries", "--stage", "1", "--output", "/not/written", "--format", "text"],
      "unrecognized arguments"),
 ])
@@ -106,9 +113,11 @@ def test_cli_generates_editable_summaries_without_overwriting_sources(tmp_path, 
     assert json.loads(captured.out) == {
         "stage": 1, "summaries_path": str(output.resolve()),
         "pois": len(manifest["pois"]), "missing": len(manifest["pois"]),
+        "summary_language": "de",
     }
     template = json.loads(output.read_text())
     assert template["source_manifest_sha256"] == hashlib.sha256(stored_before).hexdigest()
+    assert template["summary_language"] == "de"
     assert template["summaries"] == {poi["id"]: None for poi in manifest["pois"]}
     template["summaries"] = {poi["id"]: "" for poi in manifest["pois"]}
     output.write_text(json.dumps(template))
@@ -143,6 +152,7 @@ def test_cli_text_status_for_empty_and_uncollected_stages_has_no_effects(tmp_pat
     assert "Snapshot: missing" in captured.out
     assert "Preparation: missing" in captured.out
     assert "Visible exports: none" in captured.out
+    assert "Summary language:" not in captured.out
     assert not root.exists()
     assert not (tmp_path / "exports").exists()
 
@@ -173,6 +183,7 @@ def test_cli_status_reports_snapshot_preparation_and_only_visible_exports(
     assert "Comments retrieved: 2026-11-18T09:00:00Z" in captured.out
     assert "Preparation: missing" in captured.out
     assert "Visible exports: none" in captured.out
+    assert "Summary language:" not in captured.out
 
     summaries = tmp_path / "summaries.json"
     assert cli.main([*prefix, "summaries", "--stage", "1", "--output", str(summaries)]) == 0
@@ -188,6 +199,9 @@ def test_cli_status_reports_snapshot_preparation_and_only_visible_exports(
     captured = capsys.readouterr()
     assert "Preparation: available (" in captured.out
     assert "Visible exports: none" in captured.out
+    assert "Summary language: de" in captured.out
+    assert cli.main(status_arguments) == 0
+    assert json.loads(capsys.readouterr().out)["stages"][0]["summary_language"] == "de"
 
     assert cli.main([*prefix, "export", "--stage", "1", "--target", "osmand"]) == 0
     exported = json.loads(capsys.readouterr().out)["stages"][0]["result"]
@@ -211,35 +225,227 @@ def test_cli_status_reports_snapshot_preparation_and_only_visible_exports(
     assert public_path not in captured.out
 
 
-def test_cli_prepare_forwards_explicit_summary_file_synchronously(tmp_path, monkeypatch, capsys):
-    workflow = Mock()
-    workflow.prepare.return_value = {"prepared": "local"}
-    create = Mock(return_value=workflow)
-    monkeypatch.setattr(cli, "Workflow", create)
-    summaries = tmp_path / "texts.json"
+@pytest.mark.parametrize("language, expected", [(None, "de"), ("EN-us", "en-us")])
+def test_cli_prepares_real_language_bound_text(
+    tmp_path, source_manifest, capsys, language, expected,
+):
+    prefix = ["--data-root", str(tmp_path / "data")]
+    assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+    capsys.readouterr()
+    output = tmp_path / "texts.json"
+    options = ["--language", language] if language is not None else []
+    assert cli.main([
+        *prefix, "summaries", "--stage", "1", "--output", str(output), *options,
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["summary_language"] == expected
+    document = json.loads(output.read_text())
+    assert document["summary_language"] == expected
+    document["summaries"] = dict.fromkeys(document["summaries"], "Complete local text.")
+    output.write_text(json.dumps(document))
+    assert cli.main([
+        *prefix, "prepare", "--stage", "1", "--summaries-file", str(output),
+        "--include-photos", *options,
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)["stages"][0]["result"]
+    prepared = json.loads(Path(result["prepared_path"]).read_text())
+    assert prepared["summary_language"] == expected
+    assert prepared["photo_mode"] == "local-files"
+    assert prepared["routes"]
+
+
+def test_cli_rejects_summary_language_mismatch_without_preparation(tmp_path, source_manifest, capsys):
+    prefix = ["--data-root", str(tmp_path / "data")]
+    assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+    capsys.readouterr()
+    output = tmp_path / "english.json"
+    assert cli.main([
+        *prefix, "summaries", "--stage", "1", "--output", str(output), "--language", "en",
+    ]) == 0
+    capsys.readouterr()
+    document = json.loads(output.read_text())
+    document["summaries"] = dict.fromkeys(document["summaries"], "English summary.")
+    output.write_text(json.dumps(document))
+    assert cli.main([
+        *prefix, "prepare", "--stage", "1", "--summaries-file", str(output),
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "language" in captured.err.lower()
+    assert "en" in captured.err and "de" in captured.err
+    assert not list((tmp_path / "data").rglob("prepared.json"))
+
+
+def test_cli_cached_prepare_keeps_multi_stage_support(tmp_path, capsys):
     root = tmp_path / "data"
-    assert cli.main([
-        "--data-root", str(root), "prepare", "--stage", "3",
-        "--summaries-file", str(summaries), "--include-photos",
-    ]) == 0
-    create.assert_called_once_with(root)
-    workflow.prepare.assert_called_once_with(3, summaries_file=summaries, include_photos=True)
-    assert json.loads(capsys.readouterr().out) == {
-        "stages": [{"stage": 3, "result": {"prepared": "local"}}],
-    }
+    prefix = ["--data-root", str(root)]
+    expected = {}
+    for stage in (1, 2):
+        source = tmp_path / f"source-{stage}"
+        source.mkdir()
+        entries = stage_entries()
+        entries[0][1]["stages"][0]["internalId"] = stage
+        for _, value in entries:
+            if "trekStageId" in value:
+                value["trekStageId"] = stage
+            for point in value.get("points", []) + value.get("interestPoints", []):
+                if point["stageId"] == 1:
+                    point["stageId"] = stage
+        cache = cache_at(source, entries)
+        manifest = export_stage(str(cache), stage, str(source / "snapshot"))["manifest_path"]
+        assert cli.main([*prefix, "adopt", "--manifest", manifest]) == 0
+        capsys.readouterr()
+        summaries = source / "summaries.json"
+        assert cli.main([
+            *prefix, "summaries", "--stage", str(stage), "--output", str(summaries),
+        ]) == 0
+        capsys.readouterr()
+        document = json.loads(summaries.read_text())
+        document["summaries"] = dict.fromkeys(document["summaries"], "Cached German text.")
+        summaries.write_text(json.dumps(document))
+        assert cli.main([
+            *prefix, "prepare", "--stage", str(stage), "--summaries-file", str(summaries),
+        ]) == 0
+        expected[stage] = json.loads(capsys.readouterr().out)["stages"][0]["result"]["prepared_path"]
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert cli.main([*prefix, "prepare", "--stage", "1", "2", "1"]) == 0
+    results = json.loads(capsys.readouterr().out)["stages"]
+    assert [item["stage"] for item in results] == [1, 2]
+    assert {item["stage"]: item["result"]["prepared_path"] for item in results} == expected
+    assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
 
 
-def test_cli_cached_prepare_keeps_multi_stage_support(tmp_path, monkeypatch, capsys):
-    workflow = Mock()
-    workflow.prepare.side_effect = [{"prepared": "first"}, {"prepared": "second"}]
-    monkeypatch.setattr(cli, "Workflow", Mock(return_value=workflow))
+@pytest.mark.parametrize("configuration", ["options", "environment"])
+def test_cli_explicit_generation_writes_model_text(
+    tmp_path, source_manifest, capsys, monkeypatch, configuration,
+):
+    manifest = json.loads(source_manifest.read_text())
+    texts = {point["id"]: "Synthetic English hiking summary." for point in manifest["pois"]}
+    calls = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append((self.path, payload, self.headers.get("Authorization")))
+            response = json.dumps({"choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": json.dumps({"summaries": texts})},
+            }]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        api_base = f"http://127.0.0.1:{server.server_port}/v1"
+        monkeypatch.setenv("HEXATREK_API_KEY", "synthetic-local-key")
+        monkeypatch.delenv("HEXATREK_MODEL", raising=False)
+        monkeypatch.delenv("HEXATREK_API_BASE", raising=False)
+        options = []
+        if configuration == "options":
+            options = ["--model", "synthetic-model", "--api-base", api_base]
+        else:
+            monkeypatch.setenv("HEXATREK_MODEL", "synthetic-model")
+            monkeypatch.setenv("HEXATREK_API_BASE", api_base)
+        prefix = ["--data-root", str(tmp_path / "data")]
+        assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+        adopted = json.loads(capsys.readouterr().out)
+        stored = Path(adopted["manifest_path"])
+        before = stored.read_bytes()
+        output = tmp_path / "generated.json"
+        assert cli.main([
+            *prefix, "summaries", "--stage", "1", "--output", str(output),
+            "--language", "EN", "--generate", *options,
+        ]) == 0
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["summary_language"] == "en"
+        assert result["missing"] == 0
+        document = json.loads(output.read_text())
+        assert document["summaries"] == texts
+        assert document["summary_language"] == "en"
+        assert document["source_manifest_sha256"] == hashlib.sha256(before).hexdigest()
+        assert len(calls) == 1
+        path, payload, authorization = calls[0]
+        assert path == "/v1/chat/completions"
+        assert payload["model"] == "synthetic-model"
+        assert json.loads(payload["messages"][-1]["content"])["summary_language"] == "en"
+        assert authorization == "Bearer synthetic-local-key"
+        assert "synthetic-local-key" not in captured.out + captured.err + output.read_text()
+        assert stored.read_bytes() == before
+        assert cli.main([
+            *prefix, "prepare", "--stage", "1", "--summaries-file", str(output),
+            "--language", "en",
+        ]) == 0
+        capsys.readouterr()
+        assert len(calls) == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_cli_drafts_status_and_preparation_ignore_unused_model_settings(
+    tmp_path, source_manifest, capsys, monkeypatch,
+):
+    import requests
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Offline CLI command contacted a model endpoint")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", forbidden)
+    monkeypatch.setenv("HEXATREK_MODEL", "unused-model")
+    monkeypatch.setenv("HEXATREK_API_BASE", "https://unused.invalid/v1")
+    monkeypatch.setenv("HEXATREK_API_KEY", "unused-key")
+    prefix = ["--data-root", str(tmp_path / "data")]
+    assert cli.main([*prefix, "status"]) == 0
+    capsys.readouterr()
+    assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+    capsys.readouterr()
+    for name, options in (
+        ("environment", []),
+        ("options", ["--model", "also-unused", "--api-base", "https://also-unused.invalid"]),
+    ):
+        output = tmp_path / f"{name}.json"
+        assert cli.main([
+            *prefix, "summaries", "--stage", "1", "--output", str(output), *options,
+        ]) == 0
+        result = json.loads(capsys.readouterr().out)
+        document = json.loads(output.read_text())
+        assert result["missing"] == len(document["summaries"])
+        assert all(text is None for text in document["summaries"].values())
+    document["summaries"] = dict.fromkeys(document["summaries"], "Local German text.")
+    output.write_text(json.dumps(document))
     assert cli.main([
-        "--data-root", str(tmp_path), "prepare", "--stage", "1", "2", "1",
+        *prefix, "prepare", "--stage", "1", "--summaries-file", str(output),
     ]) == 0
-    assert [call.args[0] for call in workflow.prepare.call_args_list] == [1, 2]
-    assert all(call.kwargs == {"summaries_file": None, "include_photos": False}
-               for call in workflow.prepare.call_args_list)
-    assert len(json.loads(capsys.readouterr().out)["stages"]) == 2
+    capsys.readouterr()
+    assert cli.main([*prefix, "prepare", "--stage", "1"]) == 0
+    capsys.readouterr()
+    assert cli.main([*prefix, "status"]) == 0
+    capsys.readouterr()
+
+
+def test_cli_generation_has_no_implicit_provider(tmp_path, source_manifest, capsys, monkeypatch):
+    monkeypatch.delenv("HEXATREK_MODEL", raising=False)
+    monkeypatch.delenv("HEXATREK_API_BASE", raising=False)
+    prefix = ["--data-root", str(tmp_path / "data")]
+    assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+    capsys.readouterr()
+    output = tmp_path / "not-generated.json"
+    assert cli.main([
+        *prefix, "summaries", "--stage", "1", "--output", str(output), "--generate",
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "explicit" in captured.err.lower()
+    assert not output.exists()
 
 
 def test_session_login_requires_confirmation_before_any_path_or_request(monkeypatch, capsys):

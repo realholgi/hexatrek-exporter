@@ -525,3 +525,93 @@ def test_summary_input_rejects_a_changed_stored_snapshot(tmp_path, source):
     with pytest.raises(ValueError, match="Stored data changed"):
         workflow.write_summaries(1, output)
     assert not output.exists()
+
+
+def test_preparations_keep_languages_separate_and_export_selected_text(tmp_path, source):
+    workflow = Workflow(tmp_path / "data")
+    adopted = workflow.adopt_snapshot(source)
+    stored = Path(adopted["manifest_path"])
+    original = stored.read_bytes()
+    german = workflow.prepare(1)
+    with pytest.raises(ValueError, match="Missing prepared summary"):
+        workflow.prepare(1, language="en")
+    summaries = tmp_path / "english.json"
+    summaries.write_text(json.dumps({
+        "schema_version": 1, "summary_language": "en",
+        "source_manifest_sha256": hashlib.sha256(original).hexdigest(),
+        "summaries": {"1:1:1": "Water availability is unconfirmed."},
+    }))
+    english = workflow.prepare(1, summaries, language="en")
+    assert english["preparation"] != german["preparation"]
+    assert workflow.status([1])["stages"][0]["summary_language"] == "en"
+    output = workflow.export(1)
+    for target in ("osmand", "komoot"):
+        tree = ET.parse(Path(output["outputs"][target]) / "stage-01.gpx")
+        assert tree.findtext(f"{{{GPX}}}wpt/{{{GPX}}}desc") == "Water availability is unconfirmed."
+    assert workflow.prepare(1) == german
+    assert workflow.prepare(1, language="en") == english
+    assert stored.read_bytes() == original
+
+
+@pytest.mark.parametrize("include_photos", [False, True])
+def test_generation_reuses_matching_language_preparation_without_model_requests(
+    tmp_path, source, monkeypatch, include_photos,
+):
+    import requests
+
+    workflow = Workflow(tmp_path / "data")
+    adopted = workflow.adopt_snapshot(source)
+    stored = Path(adopted["manifest_path"])
+    original = stored.read_bytes()
+    summaries = tmp_path / "english.json"
+    summaries.write_text(json.dumps({
+        "schema_version": 1, "summary_language": "en",
+        "source_manifest_sha256": hashlib.sha256(original).hexdigest(),
+        "summaries": {"1:1:1": "Water availability is unconfirmed."},
+    }))
+    workflow.prepare(1, summaries, include_photos=include_photos, language="en")
+    workflow.prepare(1)
+    before = (workflow.root / "stages/01/stage.json").read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Verified same-language text must not contact a model")
+
+    monkeypatch.setattr(requests, "Session", forbidden)
+    output = tmp_path / "english-copy.json"
+    result = workflow.write_summaries(1, output, language="en", generate=True)
+    document = json.loads(output.read_text())
+    assert document["summary_language"] == "en"
+    assert document["summaries"] == {"1:1:1": "Water availability is unconfirmed."}
+    assert result["missing"] == 0
+    assert (workflow.root / "stages/01/stage.json").read_bytes() == before
+    assert stored.read_bytes() == original
+
+
+def test_uncached_generation_does_not_reuse_german_or_write_partial_output(tmp_path, source):
+    workflow = Workflow(tmp_path / "data")
+    workflow.adopt_snapshot(source)
+    workflow.prepare(1)
+    state_path = workflow.root / "stages/01/stage.json"
+    before = state_path.read_bytes()
+    output = tmp_path / "absent/english.json"
+    with pytest.raises(ValueError):
+        workflow.write_summaries(1, output, language="en", generate=True)
+    assert not output.parent.exists()
+    assert state_path.read_bytes() == before
+
+
+def test_existing_summary_destination_is_rejected_before_generation(tmp_path, source, monkeypatch):
+    from hexatrek_exporter import summary_generation
+
+    workflow = Workflow(tmp_path / "data")
+    workflow.adopt_snapshot(source)
+    output = tmp_path / "edited.json"
+    output.write_text("Keep edited content")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An existing output must be rejected before any model generation")
+
+    monkeypatch.setattr(summary_generation, "generate_summaries", forbidden)
+    with pytest.raises(FileExistsError):
+        workflow.write_summaries(1, output, language="en", generate=True)
+    assert output.read_text() == "Keep edited content"

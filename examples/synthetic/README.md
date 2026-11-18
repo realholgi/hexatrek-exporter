@@ -13,23 +13,25 @@ Use a new temporary directory so the example cannot change existing stage data:
 demo=$(mktemp -d)
 hexatrek --data-root "$demo/data" adopt \
   --manifest examples/synthetic/source/manifest.json
-hexatrek --data-root "$demo/data" summaries --stage 1 \
+hexatrek --data-root "$demo/data" summaries --stage 1 --language en \
   --output "$demo/stage-01-summaries.json"
 ```
 
-The generated JSON contains the source hash and all three POI IDs.
+The generated JSON contains the source hash, `summary_language: "en"` and all three POI IDs.
 Its missing summaries are `null` because the source has no summaries.
 Replace each `null` with your text, or copy the completed example:
 
 ```bash
 cp examples/synthetic/stage-01-summaries.json "$demo/stage-01-summaries.json"
-hexatrek --data-root "$demo/data" prepare --stage 1 \
+hexatrek --data-root "$demo/data" prepare --stage 1 --language en \
   --summaries-file "$demo/stage-01-summaries.json"
 hexatrek --data-root "$demo/data" export --stage 1 --target osmand,komoot
 hexatrek --data-root "$demo/data" status --stage 1 --format text
 ```
 
 Without `--format text`, status returns JSON.
+The example uses English summaries explicitly. Commands without `--language` default to German.
+This walkthrough uses no model endpoint; `--generate` is a separate opt-in.
 
 The public GPXs land in:
 

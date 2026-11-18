@@ -6,7 +6,7 @@ Export HexaTrek stages, alternative routes, POIs and community reports for OsmAn
 Keep original source data and full comments alongside the generated GPXs.
 
 Use the `hexatrek` CLI to collect downloaded sources, apply local summaries and write exports.
-It needs no model API key or Komoot credentials.
+Offline exports need no model service or Komoot credentials.
 
 - OsmAnd: navigation tracks, POIs and colored bivouac overlays.
 - Komoot: GPXs with concise POI text, split into sections when needed.
@@ -26,7 +26,7 @@ python -m pip install -e .
 hexatrek status --format text
 ```
 
-The runtime dependency is `requests`, used for explicitly requested community refresh and session operations.
+The runtime dependency is `requests`, used for community refresh, session operations and optional model-generated summaries.
 
 To try the exporter without app data, use the [synthetic example](examples/synthetic/README.md).
 
@@ -57,8 +57,24 @@ hexatrek prepare --stage 1 --summaries-file ./data/stage-01-summaries.json
 hexatrek export --stage 1 --target komoot
 ```
 
+German (`de`) is the default summary language.
+For automatic English summaries, use an OpenAI-compatible endpoint and a model it serves:
+
+```bash
+hexatrek summaries --stage 1 --generate --language en \
+  --api-base http://localhost:11434/v1 --model your-model \
+  --output ./data/stage-01-summaries-en.json
+hexatrek prepare --stage 1 --language en \
+  --summaries-file ./data/stage-01-summaries-en.json
+hexatrek export --stage 1 --target komoot
+```
+
+Replace `your-model` with your model name.
+See [automatic summaries](docs/workflow.md#automatic-summaries) for hosted endpoints, credentials and cache reuse.
+
 Import the GPXs from `exports/komoot/stage-01/` into Komoot.
-These commands use local data. For current community reports, see [refresh](docs/workflow.md#2-refresh-community-reports-when-needed).
+Collection and export use local data; `summaries --generate` contacts the configured model.
+For current community reports, see [refresh](docs/workflow.md#2-refresh-community-reports-when-needed).
 
 ## Guides
 

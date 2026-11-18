@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from hexatrek_exporter.artifacts import display_name, local_file
-from hexatrek_exporter.summaries import load_summaries
+from hexatrek_exporter.summaries import load_summaries, normalize_language
 from hexatrek_exporter.naming import prepared_filenames
 from hexatrek_exporter.poi_details import (
     GPX, add_photos_to_bundle, comment_datetime, details_bundle,
@@ -89,15 +89,16 @@ def _comment_index(point, source_comments, identity):
     raise ValueError(f"Unknown photo comment {identity!r}")
 
 
-def prepare_export(manifest_path, output_directory, summaries_file=None, *, include_photos=False):
+def prepare_export(manifest_path, output_directory, summaries_file=None, *, include_photos=False, language="de"):
     """Write a new preparation from complete, validated local summary text.
 
     Sections share their boundary track point, never their waypoints. Source GPX
     bytes are retained in every detail archive, including original text and links.
     Photos are explicitly omitted by default; include_photos requires local files.
     """
+    language = normalize_language(language)
     manifest_path = Path(manifest_path).expanduser()
-    manifest, summaries, _ = load_summaries(manifest_path, summaries_file)
+    manifest, summaries, _ = load_summaries(manifest_path, summaries_file, language=language)
     stage = manifest.get("stage_id")
     if stage is None:
         main = next((route for route in manifest["routes"] if route["kind"] == "main"), {})
@@ -211,6 +212,7 @@ def prepare_export(manifest_path, output_directory, summaries_file=None, *, incl
                 })
         index = {"schema_version": 1, "stage_id": stage, "source_manifest": str(manifest_path.absolute()),
                  "source_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                 "summary_language": language,
                  "photo_mode": "local-files" if include_photos else "omitted",
                  "comments_coverage": manifest["source"]["comments_coverage"], "routes": prepared_routes}
         (staging / "prepared.json").write_text(json.dumps(index, ensure_ascii=False, indent=2))

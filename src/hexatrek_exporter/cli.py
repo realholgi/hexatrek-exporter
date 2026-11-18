@@ -2,9 +2,11 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
+from hexatrek_exporter.summaries import normalize_language
 from hexatrek_exporter.workflow import Workflow
 
 
@@ -36,9 +38,17 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("--stage", type=_stage, nargs="+")
     status.add_argument("--format", choices=("text", "json"), default="json",
                         help="status output format (default: json)")
-    summaries = commands.add_parser("summaries", help="write editable POI summary input")
+    summaries = commands.add_parser("summaries", help="draft or explicitly generate POI summaries")
     summaries.add_argument("--stage", type=_stage, required=True)
     summaries.add_argument("--output", type=Path, required=True)
+    summaries.add_argument("--language", type=normalize_language, default="de",
+                           help="summary language (default: de)")
+    summaries.add_argument("--generate", action="store_true",
+                           help="generate summaries with the explicitly configured model endpoint")
+    summaries.add_argument("--model", default=os.environ.get("HEXATREK_MODEL"),
+                           help="model name (default: HEXATREK_MODEL; used only with --generate)")
+    summaries.add_argument("--api-base", default=os.environ.get("HEXATREK_API_BASE"),
+                           help="OpenAI-compatible API base (default: HEXATREK_API_BASE; used only with --generate)")
     adopt = commands.add_parser("adopt", help="copy an existing source snapshot into storage")
     adopt.add_argument("--manifest", required=True)
     login = commands.add_parser("session-login", help="reuse or create a private anonymous session")
@@ -57,6 +67,8 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--session-file", required=True)
             command.add_argument("--photo-mode", choices=("none", "files", "links"), default="none")
         elif name == "prepare":
+            command.add_argument("--language", type=normalize_language, default="de",
+                                 help="summary language (default: de)")
             command.add_argument("--summaries-file", type=Path,
                                  help="complete POI text JSON for exactly one stage")
             command.add_argument("--include-photos", action="store_true",
@@ -79,7 +91,10 @@ def _execute(args) -> dict:
     if args.command == "adopt":
         return workflow.adopt_snapshot(args.manifest)
     if args.command == "summaries":
-        return workflow.write_summaries(args.stage, args.output)
+        return workflow.write_summaries(
+            args.stage, args.output, language=args.language, generate=args.generate,
+            model=args.model, api_base=args.api_base,
+        )
     if args.command == "adopt-preparation":
         return workflow.adopt_preparation(args.stage, args.prepared_path)
     results = []
@@ -90,7 +105,7 @@ def _execute(args) -> dict:
             result = workflow.refresh(stage, args.session_file, args.photo_mode)
         elif args.command == "prepare":
             result = workflow.prepare(stage, summaries_file=args.summaries_file,
-                                      include_photos=args.include_photos)
+                                      include_photos=args.include_photos, language=args.language)
         elif args.command == "export":
             result = workflow.export(stage, args.target)
         results.append({"stage": stage, "result": result})
@@ -116,6 +131,8 @@ def _status_text(result: dict) -> str:
             lines.append(f"  Preparation: available ({stage['preparation_path']})")
         else:
             lines.append("  Preparation: missing")
+        if "summary_language" in stage:
+            lines.append(f"  Summary language: {stage['summary_language']}")
         outputs = stage.get("outputs", {})
         if outputs:
             lines.append("  Visible exports:")

@@ -92,6 +92,18 @@ def _stage_id(stage):
     return f"{stage:02d}"
 
 
+def _prepared_summaries(directory):
+    from .poi_details import GPX
+    import xml.etree.ElementTree as ET
+
+    summaries = {}
+    for route in _read(Path(directory) / "prepared.json")["routes"]:
+        texts = {point.findtext(f"{{{GPX}}}name"): point.findtext(f"{{{GPX}}}desc", default="")
+                 for point in ET.parse(_file(directory, route["gpx"])).findall(f"{{{GPX}}}wpt")}
+        summaries.update({identity: texts[alias] for identity, alias in route["aliases"].items()})
+    return summaries
+
+
 class Workflow:
     """Own paths, provenance and local retries for exporter artifacts.
 
@@ -198,6 +210,11 @@ class Workflow:
             for key, kind in (("snapshot", "snapshots"), ("preparation", "preparations"), ("export", "exports")):
                 if state.get(key):
                     row[key + "_path"] = str(self._artifact(stage, kind, state[key]))
+            if state.get("preparation"):
+                from .summaries import normalize_language
+
+                prepared = _read(Path(row["preparation_path"]) / "prepared.json")
+                row["summary_language"] = normalize_language(prepared.get("summary_language", "de"))
             if state.get("export"):
                 record_path = self._artifact(stage, "exports", state["export"]) / "run.json"
                 row["export_record_path"] = str(record_path)
@@ -209,19 +226,54 @@ class Workflow:
             rows.append(row)
         return {"data_root": str(self.root), "exports_root": str(self.output_root), "stages": rows}
 
-    def write_summaries(self, stage, output_path):
-        """Write an editable summary input without changing the active snapshot."""
-        from .summaries import summary_document
+    def write_summaries(self, stage, output_path, *, language="de", generate=False,
+                        model=None, api_base=None):
+        """Write source-bound drafts or explicitly generated, language-bound text."""
+        from .summaries import normalize_language, summary_document, text_issues
 
+        language = normalize_language(language)
         self._snapshot(stage, self._state(stage))
         destination = Path(output_path).expanduser().absolute()
         resolved = destination.resolve()
         if resolved.is_relative_to(self.root / "stages") or resolved.is_relative_to(self.output_root):
             raise ValueError("Summary input must stay outside managed stages and public exports")
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(f"Summary output already exists: {destination}")
         with self._lock(stage):
-            snapshot = self._snapshot(stage, self._state(stage))
+            state = self._state(stage)
+            snapshot = self._snapshot(stage, state)
             _verify(snapshot)
-            document = summary_document(snapshot / "manifest.json")
+            document = summary_document(snapshot / "manifest.json", language=language)
+            if generate:
+                cached = None
+                if state.get("preparation"):
+                    active = self._prepared(stage, state)
+                    active_language = normalize_language(_read(active / "prepared.json").get("summary_language", "de"))
+                    if active_language == language:
+                        cached = active
+                if cached is None:
+                    for include_photos in (False, True):
+                        recipe_path = self._recipe_path(stage, snapshot, include_photos, language)
+                        if not recipe_path.exists():
+                            continue
+                        recipe = _read(recipe_path)
+                        if (recipe.get("snapshot") == state["snapshot"] and
+                                recipe.get("version") == RECIPE_VERSION and
+                                normalize_language(recipe.get("summary_language", "de")) == language):
+                            candidate = self._prepared(stage, {**state, "preparation": recipe["preparation"]})
+                            if normalize_language(_read(candidate / "prepared.json").get("summary_language", "de")) != language:
+                                raise ValueError("Cached preparation summary language does not match")
+                            cached = candidate
+                            break
+                if cached is not None:
+                    for identity, text in _prepared_summaries(cached).items():
+                        if identity in document["summaries"] and not text_issues(identity, text):
+                            document["summaries"][identity] = text
+                from .summary_generation import generate_summaries
+
+                document = generate_summaries(
+                    snapshot / "manifest.json", document, api_base=api_base, model=model,
+                    api_key=os.environ.get("HEXATREK_API_KEY"))
             payload = (json.dumps(document, indent=2, allow_nan=False) + "\n").encode("utf-8")
             _verify(snapshot)
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +281,8 @@ class Workflow:
                 stream.write(payload)
             texts = document["summaries"]
             return {"stage": stage, "summaries_path": str(destination),
-                    "pois": len(texts), "missing": sum(text is None for text in texts.values())}
+                    "pois": len(texts), "missing": sum(text is None for text in texts.values()),
+                    "summary_language": language}
 
     def _snapshot(self, stage, state):
         if not state.get("snapshot"):
@@ -305,6 +358,9 @@ class Workflow:
         prepared = _read(path)
         if prepared.get("schema_version") != 1:
             raise ValueError("Expected a prepared manifest version 1")
+        from .summaries import normalize_language
+
+        normalize_language(prepared.get("summary_language", "de"))
         for route in prepared["routes"]:
             _file(path.parent, route["gpx"])
             _file(path.parent, route["details"])
@@ -382,27 +438,35 @@ class Workflow:
             self._save(stage, state)
             return {"stage": stage, "preparation": identity, "prepared_path": str(destination / "prepared.json")}
 
-    def prepare(self, stage, summaries_file=None, include_photos=False):
-        from .preparation import prepare_export
-        from .summaries import load_summaries
+    def _recipe_path(self, stage, snapshot, include_photos, language):
+        photo_label = "mit" if include_photos else "ohne"
+        language_suffix = f"-{language}" if language != "de" else ""
+        return self._directory(stage) / "preparations" / (
+            f"rezept-{snapshot.name}-v{RECIPE_VERSION}-{photo_label}-fotos{language_suffix}.json")
 
+    def prepare(self, stage, summaries_file=None, include_photos=False, *, language="de"):
+        from .preparation import prepare_export
+        from .summaries import load_summaries, normalize_language
+
+        language = normalize_language(language)
         with self._lock(stage):
             state = self._state(stage)
             snapshot = self._snapshot(stage, state)
             _verify(snapshot)
             summaries_sha256 = None
             if summaries_file is not None:
-                _, _, summaries_sha256 = load_summaries(snapshot / "manifest.json", summaries_file)
-            recipe = {"snapshot": state["snapshot"], "version": RECIPE_VERSION, "include_photos": include_photos}
+                _, _, summaries_sha256 = load_summaries(snapshot / "manifest.json", summaries_file, language=language)
+            recipe = {"snapshot": state["snapshot"], "version": RECIPE_VERSION,
+                      "include_photos": include_photos, "summary_language": language}
             if summaries_sha256 is not None:
                 recipe["summaries_file_sha256"] = summaries_sha256
-            photo_label = "mit" if include_photos else "ohne"
-            recipe_path = self._directory(stage) / "preparations" / (
-                f"rezept-{snapshot.name}-v{RECIPE_VERSION}-{photo_label}-fotos.json")
+            recipe_path = self._recipe_path(stage, snapshot, include_photos, language)
             stored_recipe = _read(recipe_path) if recipe_path.exists() else None
             stored_inputs = {
                 key: value for key, value in stored_recipe.items() if key != "preparation"
             } if stored_recipe is not None else None
+            if stored_inputs is not None:
+                stored_inputs["summary_language"] = normalize_language(stored_inputs.get("summary_language", "de"))
             if stored_inputs is not None and summaries_file is None:
                 # No replacement text was supplied: reuse the last validated preparation.
                 stored_inputs.pop("summaries_file_sha256", None)
@@ -410,10 +474,12 @@ class Workflow:
                 identity = stored_recipe["preparation"]
                 destination = self._artifact(stage, "preparations", identity)
                 _verify(destination)
+                if normalize_language(_read(destination / "prepared.json").get("summary_language", "de")) != language:
+                    raise ValueError("Cached preparation summary language does not match")
             else:
                 with self._temporary() as temporary:
                     prepare_export(str(snapshot / "manifest.json"), str(temporary / "prepared"), summaries_file,
-                                   include_photos=include_photos)
+                                   include_photos=include_photos, language=language)
                     identity, destination = self._store_preparation(stage, temporary / "prepared/prepared.json")
                 _write(recipe_path, {**recipe, "preparation": identity})
             state["preparation"] = identity
@@ -574,13 +640,7 @@ class Workflow:
                         manifest_path = snapshot / "manifest.json"
                         if preparation:
                             manifest = _read(manifest_path)
-                            summaries = {}
-                            from .poi_details import GPX
-                            import xml.etree.ElementTree as ET
-                            for route in _read(preparation / "prepared.json")["routes"]:
-                                texts = {p.findtext(f"{{{GPX}}}name"): p.findtext(f"{{{GPX}}}desc", default="")
-                                         for p in ET.parse(preparation / route["gpx"]).findall(f"{{{GPX}}}wpt")}
-                                summaries.update({identity: texts[alias] for identity, alias in route["aliases"].items()})
+                            summaries = _prepared_summaries(preparation)
                             for poi in manifest["pois"]:
                                 poi["summary"] = summaries[poi["id"]]
                             manifest_path = temporary / "osmand-source.json"

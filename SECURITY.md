@@ -10,6 +10,25 @@ It does not use ambient proxies or `.netrc` credentials for authentication.
 Authentication errors omit credentials and response bodies.
 Do not attach session files, source caches, GPXs, archives, photos or raw logs to public issues.
 
+## Model credentials
+
+`summaries --generate` sends POI names, types, descriptions and report dates/text to your configured model endpoint.
+Separate author, link, photo and raw-record fields are omitted.
+No model request runs without `--generate`; matching cached text also needs no request.
+
+For authenticated providers, set `HEXATREK_API_KEY` in your shell without putting it in command history:
+
+```bash
+printf 'Model API key: '
+read -r -s HEXATREK_API_KEY
+printf '\n'
+export HEXATREK_API_KEY
+```
+
+Keep keys out of endpoint URLs, summary JSON and exports.
+Generation refuses redirects and does not use ambient proxy or `.netrc` credentials.
+Errors omit provider response bodies and credentials.
+
 ## Local checks
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and run:

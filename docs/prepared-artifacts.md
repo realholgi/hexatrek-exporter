@@ -27,6 +27,7 @@ stage-01-details.zip
 {
   "schema_version": 1,
   "stage_id": 1,
+  "summary_language": "de",
   "comments_coverage": "cache-only",
   "routes": [
     {
@@ -46,6 +47,7 @@ stage-01-details.zip
 | --- | --- |
 | `schema_version` | Integer `1` |
 | `stage_id` | Positive stage number used in publication record names |
+| `summary_language` | Normalized POI summary language tag, such as `de`, `en` or `fr`; omitted in older files means `de` |
 | `comments_coverage` | Source coverage label; only `cloud-complete` suppresses the cache-only tour notice |
 | `routes` | Prepared main routes, alternatives or adjoining sections |
 | `routes[].id` | Stable route or section identity, recorded in publication receipts |

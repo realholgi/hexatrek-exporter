@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "summary_language": "en",
   "source_manifest_sha256": "ba5010585a9bc9e2bc23700cb38a15383def0bbabbc22b5b78123785004cd3b9",
   "summaries": {
     "1:1:1": "Synthetic spring. Imaginary water flow reported on 2026-01-02. Do not use for navigation.",
