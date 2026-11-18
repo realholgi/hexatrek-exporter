@@ -52,7 +52,7 @@ hexatrek refresh --stage 1 2 --session-file /private/session.json --photo-mode n
 | --- | --- |
 | `none` | Refresh reports without photos. This is the workflow default. |
 | `links` | Retain sensitive, image-specific HTTPS download URLs without downloading images. |
-| `files` | Download original images for offline detail archives. |
+| `files` | Download and compress local images for offline detail archives. |
 
 Refresh uses an existing session and does not create an account.
 If you need a session, explicitly authorize anonymous Firebase signup:
@@ -76,6 +76,49 @@ The Python `hexatrek_exporter.hexatrek_refresh.refresh_pois` function also accep
 With photos enabled, its default mode is `links`, unlike workflow refresh.
 Requests use fixed HexaTrek Google endpoints and refuse redirects, ambient proxies and `.netrc` credentials.
 Keep photo access URLs private. See [credential protection](../SECURITY.md) for handling and checks.
+
+### Photo quality and private libraries
+
+Local photo downloads use `med` by default.
+Choose a preset with `--photo-quality`:
+
+| Preset | Maximum longest side | JPEG quality |
+| --- | --- | --- |
+| `hi` | 1000 px | 55 |
+| `med` | 800 px | 50 |
+| `lo` | 640 px | 45 |
+
+The encoder preserves orientation and aspect ratio, avoids upscaling and removes EXIF/GPS metadata.
+These are lossy reference images. Fine text and zoomed detail can be lost.
+Quality affects local files, not remote photos displayed through links.
+
+Download the active snapshot's photo references into `data/photos/stage-01/`:
+
+```bash
+hexatrek photos --stage 1 --session-file /private/session.json --photo-quality med
+```
+
+This command does not refresh comments or change active exports.
+To compact an existing library offline, omit `--session-file`.
+The library keeps SHA-256 filenames and maps each file to its POI, comment and original image name.
+It records the original image's MD5, SHA-256 and byte size separately from the local file's SHA-256.
+Matching Firebase metadata permits reuse of compressed files without downloading the original again.
+Changed objects need new image bytes.
+An increase in quality can also require a download when the original pixels are no longer available.
+Repeating the same preset reuses the encoded bytes without further quality loss.
+
+Files-mode refreshes and updates also accept `--photo-quality`.
+They automatically use a matching private stage library when present:
+
+```bash
+hexatrek update --stage 1 --session-file /private/session.json \
+  --photo-mode files --photo-quality lo
+```
+
+Updates inherit the selected quality from an existing files-mode snapshot, otherwise they use `med`.
+The library retains exact source manifests and source GPX bytes.
+Compaction validates a complete replacement before removing the previous photo files.
+
 
 ## 3. Prepare Komoot summaries
 
@@ -203,6 +246,69 @@ Matching completed preparations and exports are reused after inventory verificat
 Old managed output versions move into internal storage.
 Unmanaged public output is not overwritten.
 Lower-level filesystem export tools require new destinations unless they explicitly offer an overwrite option.
+
+## 5. Update exported stages
+
+Use `update` to refresh reports and photos, then rebuild the stages you already exported:
+
+```bash
+hexatrek update --stage 1 2 --session-file /private/session.json
+```
+
+The command inherits each stage's exported targets, active summary language and source photo mode.
+German applies when no language is recorded.
+Use `--target osmand,komoot`, `--language en` or `--photo-mode links` to change these settings for a new update.
+Use `links` for photo URLs in OsmAnd GPXs.
+Use `files` for compressed images in private detail archives. Public directories still contain only GPXs.
+File reuse requires a valid local image, matching local SHA-256 and matching cloud content metadata.
+If the cloud image changed at the same name, the command downloads its new bytes.
+
+Each update reports added, changed and removed comments and photos.
+Changes to retrieval timestamps alone do not replace exports.
+Unchanged summary inputs retain their reviewed text.
+Changes to names, descriptions, types or report text/dates require new summaries.
+Photo-only changes do not require new summaries.
+An unprepared OsmAnd export keeps full reports without requiring short summaries.
+
+### Review changed summaries
+
+When text needs review, the command returns `status: "needs-review"`, an `update_id` and a private `summaries_path`.
+Current exports and the active snapshot stay unchanged.
+Edit the reported file. Replace the affected `null` values and retain its hash, language and POI IDs.
+Then resume the same candidate:
+
+```bash
+hexatrek update --stage 1 --resume UPDATE_ID
+```
+
+Replace `UPDATE_ID` with the returned value.
+To use a separate edited file, add `--summaries-file ./data/stage-01-reviewed.json`.
+Resume uses the saved candidate and needs no session or new cloud fetch.
+Its photo mode, quality, targets and language remain fixed.
+
+### Generate changed summaries
+
+With a model endpoint configured as described under [automatic summaries](#automatic-summaries), use:
+
+```bash
+hexatrek update --stage 1 --session-file /private/session.json --generate
+```
+
+Only missing or invalid summaries go to the model.
+You can also add `--generate` when resuming a review.
+No model call runs without this flag.
+
+### Publication and recovery
+
+The command builds and validates all requested payloads before replacing current exports.
+It archives prior managed versions and preserves filenames, route geometry and elevations.
+Publication uses a journal and one directory rename per target.
+If publication stops between targets, resume the same update to finish it without fetching, generating or rendering again.
+Use `hexatrek status --stage 1 --format text` to find pending update IDs after an error.
+A newer stage state or user-edited public export blocks stale candidates.
+
+Updates change local exports. Reimport the GPXs to update copies already in navigation apps.
+
 
 ## Errors and recovery
 

@@ -17,6 +17,13 @@
 │   │   ├── exports/            # Internal versions and run.json
 │   │   ├── storage.json
 │   │   └── stage.json
+│   ├── photos/stage-01/        # Private reusable photo library
+│   │   ├── photos/            # SHA-256-named image files
+│   │   ├── source/            # Unchanged source GPXs
+│   │   ├── source-manifest.json
+│   │   ├── manifest.json      # Photo identities, quality and original/local hashes
+│   │   ├── inventory.json
+│   │   └── run.json
 │   ├── publications/komoot/
 │   └── cache/                 # Disposable working files
 └── exports/                   # Public GPXs only

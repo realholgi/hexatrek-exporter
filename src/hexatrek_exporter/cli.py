@@ -56,7 +56,29 @@ def _parser() -> argparse.ArgumentParser:
     login.add_argument("--session-file", required=True)
     login.add_argument("--confirm", action="store_true", required=True,
                        help="confirm anonymous account creation if the session does not exist")
-    for name in ("collect", "refresh", "prepare", "export", "adopt-preparation"):
+    update = commands.add_parser("update", help="update an exported stage without replacing its original snapshot")
+    update.add_argument("--stage", type=_stage, nargs="+", required=True)
+    update.add_argument("--session-file",
+                        help="existing private session (required for a fresh update)")
+    update.add_argument("--photo-mode", choices=("none", "files", "links"), default=None,
+                        help="photo handling (default: inherit the existing export)")
+    update.add_argument("--photo-quality", choices=("hi", "med", "lo"), default=None,
+                        help="cached photos: hi 1000px/JPEG55, med 800px/JPEG50, lo 640px/JPEG45 "
+                             "(longest side; default: inherit selected quality, otherwise med)")
+    update.add_argument("--target", type=_targets, default=None,
+                        help="export targets (default: inherit the existing export)")
+    update.add_argument("--language", type=normalize_language, default=None,
+                        help="summary language (default: inherit, otherwise de)")
+    update.add_argument("--generate", action="store_true",
+                        help="generate summaries with the explicitly configured model endpoint")
+    update.add_argument("--model", default=os.environ.get("HEXATREK_MODEL"),
+                        help="model name (default: HEXATREK_MODEL; used only with --generate)")
+    update.add_argument("--api-base", default=os.environ.get("HEXATREK_API_BASE"),
+                        help="OpenAI-compatible API base (default: HEXATREK_API_BASE; used only with --generate)")
+    update.add_argument("--summaries-file", type=Path,
+                        help="reviewed POI text JSON for exactly one stage")
+    update.add_argument("--resume", help="technical update id to resume for exactly one stage")
+    for name in ("collect", "refresh", "photos", "prepare", "export", "adopt-preparation"):
         command = commands.add_parser(name)
         command.add_argument("--stage", type=_stage,
                              **({} if name.startswith("adopt-") else {"nargs": "+"}),
@@ -66,6 +88,15 @@ def _parser() -> argparse.ArgumentParser:
         elif name == "refresh":
             command.add_argument("--session-file", required=True)
             command.add_argument("--photo-mode", choices=("none", "files", "links"), default="none")
+            command.add_argument("--photo-quality", choices=("hi", "med", "lo"), default="med",
+                                 help="cached photos: hi 1000px/JPEG55, med 800px/JPEG50, lo 640px/JPEG45 "
+                                      "(longest side; default: med)")
+        elif name == "photos":
+            command.add_argument("--session-file",
+                                 help="existing private session (omit for offline cache compression)")
+            command.add_argument("--photo-quality", choices=("hi", "med", "lo"), default="med",
+                                 help="cached photos: hi 1000px/JPEG55, med 800px/JPEG50, lo 640px/JPEG45 "
+                                      "(longest side; default: med)")
         elif name == "prepare":
             command.add_argument("--language", type=normalize_language, default="de",
                                  help="summary language (default: de)")
@@ -102,12 +133,24 @@ def _execute(args) -> dict:
         if args.command == "collect":
             result = workflow.collect(stage, args.cache_path)
         elif args.command == "refresh":
-            result = workflow.refresh(stage, args.session_file, args.photo_mode)
+            result = workflow.refresh(stage, args.session_file, args.photo_mode,
+                                      photo_quality=args.photo_quality)
+        elif args.command == "photos":
+            result = workflow.photos(stage, session_file=args.session_file,
+                                     photo_quality=args.photo_quality)
         elif args.command == "prepare":
             result = workflow.prepare(stage, summaries_file=args.summaries_file,
                                       include_photos=args.include_photos, language=args.language)
         elif args.command == "export":
             result = workflow.export(stage, args.target)
+        elif args.command == "update":
+            result = workflow.update(
+                stage, session_file=args.session_file, photo_mode=args.photo_mode,
+                photo_quality=args.photo_quality,
+                targets=args.target, language=args.language, generate=args.generate,
+                model=args.model, api_base=args.api_base,
+                summaries_file=args.summaries_file, resume=args.resume,
+            )
         results.append({"stage": stage, "result": result})
     return {"stages": results}
 
@@ -133,6 +176,8 @@ def _status_text(result: dict) -> str:
             lines.append("  Preparation: missing")
         if "summary_language" in stage:
             lines.append(f"  Summary language: {stage['summary_language']}")
+        for update in stage.get("pending_updates", []):
+            lines.append(f"  Update: {update['status']} (--resume {update['update_id']})")
         outputs = stage.get("outputs", {})
         if outputs:
             lines.append("  Visible exports:")
@@ -148,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "prepare" and args.summaries_file is not None and len(set(args.stage)) != 1:
         parser.error("--summaries-file requires exactly one stage")
+    if args.command == "update":
+        if args.summaries_file is not None and len(set(args.stage)) != 1:
+            parser.error("--summaries-file requires exactly one stage")
+        if args.resume is not None and len(set(args.stage)) != 1:
+            parser.error("--resume requires exactly one stage")
     try:
         result = _execute(args)
     except Exception as exc:

@@ -129,7 +129,7 @@ class Workflow:
 
     def _artifact(self, stage, kind, identity):
         """Resolve a technical identity exclusively through the storage index."""
-        name = self._storage(stage)[kind].get(identity)
+        name = self._storage(stage).get(kind, {}).get(identity)
         if name is None:
             raise ValueError(f"No stored {kind} mapping for {identity}; migrate the stage storage first")
         if not name or Path(name).name != name or name in (".", ".."):
@@ -148,11 +148,11 @@ class Workflow:
     def _destination(self, stage, kind, identity, label):
         """Reuse an indexed identity or reserve a collision-free readable name."""
         storage = self._storage(stage)
-        if identity in storage[kind]:
+        if identity in storage.get(kind, {}):
             return self._artifact(stage, kind, identity)
         if not label or Path(label).name != label or label in (".", ".."):
             raise ValueError("Artifact label must be a single descriptive name")
-        return self._available(self._directory(stage) / kind / label, storage[kind].values())
+        return self._available(self._directory(stage) / kind / label, storage.get(kind, {}).values())
 
     def _register(self, stage, kind, identity, path):
         """Atomically index an artifact after its successful final rename."""
@@ -160,6 +160,7 @@ class Workflow:
         if path.parent != self._directory(stage) / kind or not path.is_dir():
             raise ValueError("Artifact must exist in its stage storage directory")
         storage = self._storage(stage)
+        storage.setdefault(kind, {})
         previous = storage[kind].get(identity)
         if previous is not None and previous != path.name:
             raise ValueError("Artifact identity already has a different directory")
@@ -223,6 +224,15 @@ class Workflow:
                 row["outputs"] = {
                     target: path for target, path in record["completed"].items()
                     if state.get("visible_exports", {}).get(target) == state["export"]}
+            pending_updates = []
+            for identity in self._storage(stage).get("updates", {}):
+                directory = self._artifact(stage, "updates", identity)
+                update = _read(directory / "run.json")
+                if update["status"] not in ("completed", "unchanged"):
+                    pending_updates.append({"update_id": identity, "status": update["status"],
+                                            "record_path": str(directory / "run.json")})
+            if pending_updates:
+                row["pending_updates"] = pending_updates
             rows.append(row)
         return {"data_root": str(self.root), "exports_root": str(self.output_root), "stages": rows}
 
@@ -289,7 +299,7 @@ class Workflow:
             raise ValueError(f"Stage {stage} has no snapshot; collect or adopt one first")
         return self._artifact(stage, "snapshots", state["snapshot"])
 
-    def _adopt(self, manifest_path):
+    def _store_snapshot(self, manifest_path):
         path = Path(manifest_path).expanduser().resolve()
         manifest = _read(path)
         if manifest.get("schema_version") != 1:
@@ -320,13 +330,18 @@ class Workflow:
                 _write(copied / "inventory.json", inventory)
                 copied.rename(destination)
                 self._register(stage, "snapshots", snapshot_id, destination)
+        return {"stage": stage, "snapshot": snapshot_id, "manifest_path": str(destination / "manifest.json")}
+
+    def _adopt(self, manifest_path):
+        result = self._store_snapshot(manifest_path)
+        stage, snapshot_id = result["stage"], result["snapshot"]
         state = self._state(stage)
         if state.get("snapshot") != snapshot_id:
             state.pop("preparation", None)
             state.pop("export", None)
         state["snapshot"] = snapshot_id
         self._save(stage, state)
-        return {"stage": stage, "snapshot": snapshot_id, "manifest_path": str(destination / "manifest.json")}
+        return result
 
     def adopt_snapshot(self, manifest_path):
         stage = _read(Path(manifest_path).expanduser())["stage_id"]
@@ -338,7 +353,7 @@ class Workflow:
             result = export_stage(cache_path, stage, str(temporary / "source"))
             return self._adopt(result["manifest_path"])
 
-    def refresh(self, stage, session_file, photo_mode="none"):
+    def refresh(self, stage, session_file, photo_mode="none", *, photo_quality="med"):
         if photo_mode not in ("none", "files", "links"):
             raise ValueError("Photo mode must be none, files or links")
         with self._lock(stage), self._temporary() as temporary:
@@ -346,12 +361,48 @@ class Workflow:
             _verify(snapshot)
             result = refresh_pois(str(snapshot / "manifest.json"), str(temporary / "source"),
                                   session_file=session_file, include_photos=photo_mode != "none",
-                                  photo_mode="files" if photo_mode == "files" else "links")
+                                  photo_mode="files" if photo_mode == "files" else "links",
+                                  photo_quality=photo_quality,
+                                  photo_cache_path=self._photo_cache(stage, photo_mode))
             refreshed = _read(result["manifest_path"])
             for poi in refreshed["pois"]:
                 poi.pop("summary", None)
             _write(result["manifest_path"], refreshed)
             return self._adopt(result["manifest_path"])
+
+    def _photo_cache(self, stage, photo_mode):
+        parent = self.root / "photos"
+        directory = parent / f"stage-{stage:02d}"
+        transaction = parent / f".stage-{stage:02d}-photo-transaction"
+        if photo_mode != "files":
+            return None
+        if transaction.exists() or transaction.is_symlink():
+            raise ValueError(f"Photo library update is interrupted; run photos --stage {stage} first")
+        path = directory / "manifest.json"
+        if parent.is_symlink() or directory.is_symlink() or path.is_symlink():
+            raise ValueError("Photo library paths must not be symlinks")
+        if directory.exists() and not path.is_file():
+            raise ValueError("Existing photo library has no manifest; restore it before reuse")
+        return str(path) if path.is_file() else None
+
+    def photos(self, stage, session_file=None, *, photo_quality="med"):
+        """Download or compact the separate private photo library."""
+        from .photo_library import manage_library
+
+        with self._lock(stage):
+            return manage_library(self, stage, session_file, quality=photo_quality)
+
+    def update(self, stage, session_file=None, photo_mode=None, targets=None, *,
+               language=None, generate=False, model=None, api_base=None,
+               summaries_file=None, resume=None, photo_quality=None):
+        """Refresh an exported stage, then review or publish a recoverable candidate."""
+        from .updates import update_stage
+
+        with self._lock(stage):
+            return update_stage(
+                self, stage, session_file=session_file, photo_mode=photo_mode, targets=targets,
+                language=language, generate=generate, model=model, api_base=api_base,
+                summaries_file=summaries_file, resume=resume, photo_quality=photo_quality)
 
     def _store_preparation(self, stage, prepared_path):
         path = Path(prepared_path).expanduser().resolve()
@@ -562,120 +613,136 @@ class Workflow:
         _write(directory / "run.json", record)
 
     def export(self, stage, targets=("osmand", "komoot")):
+        with self._lock(stage):
+            return self._export(stage, targets, self._state(stage))
+
+    def _export(self, stage, targets, state, *, publish=True):
+        """Build all target payloads before entering recoverable publication."""
         targets = tuple(sorted(set(targets)))
         if not targets or set(targets) - {"osmand", "komoot"}:
             raise ValueError("Export targets must be osmand and/or komoot")
-        with self._lock(stage):
-            state = self._state(stage)
-            snapshot = self._snapshot(stage, state)
-            _verify(snapshot)
-            preparation = self._prepared(stage, state) if "komoot" in targets or state.get("preparation") else None
-            recipe = {"snapshot": state["snapshot"], "preparation": state.get("preparation"),
-                      "targets": list(targets), "version": RECIPE_VERSION}
-            run_id = _identity(recipe)
-            directory = self._destination(
-                stage, "exports", run_id, export_name(stage, targets, datetime.now(timezone.utc).isoformat()))
-            record_path = directory / "run.json"
-            if directory.exists():
-                record = _read(record_path)
-            else:
-                record = {"schema_version": 1, **recipe,
-                          "created_at": datetime.now(timezone.utc).isoformat(),
-                          "completed": {}, "inventories": {}, "receipts": {}}
-                directory.parent.mkdir(parents=True, exist_ok=True)
-                with self._temporary() as temporary:
-                    staged = temporary / "export"
-                    staged.mkdir()
-                    _write(staged / "run.json", record)
-                    staged.rename(directory)
-                self._register(stage, "exports", run_id, directory)
+        snapshot = self._snapshot(stage, state)
+        _verify(snapshot)
+        preparation = self._prepared(stage, state) if "komoot" in targets or state.get("preparation") else None
+        recipe = {"snapshot": state["snapshot"], "preparation": state.get("preparation"),
+                  "targets": list(targets), "version": RECIPE_VERSION}
+        include_photos = bool(state.get("osmand_photos")) and "osmand" in targets
+        if include_photos:
+            recipe["osmand_photos"] = True
+        run_id = _identity(recipe)
+        directory = self._destination(
+            stage, "exports", run_id, export_name(stage, targets, datetime.now(timezone.utc).isoformat()))
+        record_path = directory / "run.json"
+        if directory.exists():
+            record = _read(record_path)
+        else:
+            record = {"schema_version": 1, **recipe,
+                      "created_at": datetime.now(timezone.utc).isoformat(),
+                      "completed": {}, "inventories": {}, "receipts": {}}
+            directory.parent.mkdir(parents=True, exist_ok=True)
+            with self._temporary() as temporary:
+                staged = temporary / "export"
+                staged.mkdir()
+                _write(staged / "run.json", record)
+                staged.rename(directory)
+            self._register(stage, "exports", run_id, directory)
+        for target in targets:
+            destination = self._public_destination(stage, target)
+            owner = state.get("visible_exports", {}).get(target)
+            if target not in record.get("pending_publication", {}) and (
+                    destination.exists() or destination.is_symlink()) and owner is None:
+                raise ValueError(f"Refusing to overwrite unmanaged public export: {destination}")
+            if (target in record["completed"] and owner == run_id
+                    and target not in record.get("pending_publication", {})):
+                _verify(destination, record["inventories"][target])
+                continue
+            intent = record.get("pending_publication", {}).get(target)
+            if intent and destination.exists() and (
+                    not intent["archive_path"] or Path(intent["archive_path"]).is_dir()):
+                if _public_inventory(destination) == record["inventories"][target]:
+                    continue
+            staged = directory / "staging" / target
+            if staged.exists():
+                _verify(staged, record["inventories"][target])
+                continue
+            with self._temporary() as temporary:
+                output = temporary / "payload"
+                output.mkdir()
+                archives = record.get("archives", {}).get(target, [])
+                if target in record["completed"]:
+                    if not archives:
+                        raise ValueError("Stored export has no managed payload; migrate the stage exports first")
+                    archived = Path(archives[-1])
+                    _verify(archived, record["inventories"][target])
+                    for filename in record["inventories"][target]:
+                        shutil.copyfile(archived / filename, output / filename)
+                elif target == "komoot":
+                    prepared = _read(preparation / "prepared.json")
+                    source_routes = {str(route["id"]): route for route in _read(snapshot / "manifest.json")["routes"]}
+                    for route in prepared["routes"]:
+                        if "kind" not in route:
+                            source_id = str(route.get("source_route_id") or str(route["id"]).split("-part-")[0])
+                            route["kind"] = source_routes[source_id]["kind"]
+                    names = export_filenames(stage, prepared["routes"], target)
+                    for route in prepared["routes"]:
+                        shutil.copyfile(_file(preparation, route["gpx"]), output / names[route["id"]]["gpx"])
+                else:
+                    manifest_path = snapshot / "manifest.json"
+                    if preparation:
+                        manifest = _read(manifest_path)
+                        summaries = _prepared_summaries(preparation)
+                        for poi in manifest["pois"]:
+                            if poi["id"] in summaries:
+                                poi["summary"] = summaries[poi["id"]]
+                        manifest_path = temporary / "osmand-source.json"
+                        _write(manifest_path, manifest)
+                    manifest = _read(manifest_path)
+                    names = export_filenames(stage, manifest["routes"], target)
+                    receipts = record.setdefault("receipts", {}).setdefault(target, {})
+                    for number, route in enumerate(manifest["routes"]):
+                        naming = names[route["id"]]
+                        result = export_osmand(str(manifest_path), str(temporary / f"route-{number}"),
+                                               str(route["id"]), include_photos=include_photos)
+                        receipt = Path(result["path"]) / "export.json"
+                        data = _read(receipt)
+                        renamed = []
+                        for filename in data["files"]:
+                            if filename in naming:
+                                shutil.copyfile(receipt.parent / filename, output / naming[filename])
+                                renamed.append(naming[filename])
+                        data["files"] = renamed
+                        data["source_manifest"] = str(snapshot / "manifest.json")
+                        data["source_manifest_sha256"] = _digest(snapshot / "manifest.json")
+                        data["preparation"] = state.get("preparation")
+                        receipts[str(route["id"])] = data
+                inventory = _public_inventory(output)
+                previous_inventory = record.setdefault("inventories", {}).get(target)
+                if previous_inventory is not None and inventory != previous_inventory:
+                    raise ValueError("Stored export inventory differs from regenerated payload")
+                record["inventories"][target] = inventory
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(output, staged)
+                _write(record_path, record)
+        if publish:
             for target in targets:
                 destination = self._public_destination(stage, target)
-                owner = state.get("visible_exports", {}).get(target)
-                if target not in record.get("pending_publication", {}) and (
-                        destination.exists() or destination.is_symlink()) and owner is None:
-                    raise ValueError(f"Refusing to overwrite unmanaged public export: {destination}")
                 if (target in record["completed"] and state.get("visible_exports", {}).get(target) == run_id
                         and target not in record.get("pending_publication", {})):
                     _verify(destination, record["inventories"][target])
                     continue
-                intent = record.get("pending_publication", {}).get(target)
-                if intent and destination.exists() and (
-                        not intent["archive_path"] or Path(intent["archive_path"]).is_dir()):
-                    if _public_inventory(destination) == record["inventories"][target]:
-                        self._publish_output(stage, target, run_id, directory, record, state, None)
-                        staged = directory / "staging" / target
-                        if staged.exists():
-                            shutil.rmtree(staged)
-                        continue
+                staged = directory / "staging" / target
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                with self._temporary() as temporary, tempfile.TemporaryDirectory(
-                        prefix=f".stage-{stage:02d}-", dir=destination.parent) as name:
-                    output = Path(name) / "payload"
-                    output.mkdir()
-                    staged = directory / "staging" / target
-                    archives = record.get("archives", {}).get(target, [])
+                with tempfile.TemporaryDirectory(prefix=f".stage-{stage:02d}-", dir=destination.parent) as name:
+                    output = None
                     if staged.exists():
                         _verify(staged, record["inventories"][target])
-                        for filename in record["inventories"][target]:
-                            shutil.copyfile(staged / filename, output / filename)
-                    elif target in record["completed"]:
-                        if not archives:
-                            raise ValueError("Stored export has no managed payload; migrate the stage exports first")
-                        archived = Path(archives[-1])
-                        _verify(archived, record["inventories"][target])
-                        for filename in record["inventories"][target]:
-                            shutil.copyfile(archived / filename, output / filename)
-                    elif target == "komoot":
-                        prepared = _read(preparation / "prepared.json")
-                        source_routes = {str(route["id"]): route for route in _read(snapshot / "manifest.json")["routes"]}
-                        for route in prepared["routes"]:
-                            if "kind" not in route:
-                                source_id = str(route.get("source_route_id") or str(route["id"]).split("-part-")[0])
-                                route["kind"] = source_routes[source_id]["kind"]
-                        names = export_filenames(stage, prepared["routes"], target)
-                        for route in prepared["routes"]:
-                            shutil.copyfile(_file(preparation, route["gpx"]), output / names[route["id"]]["gpx"])
-                    else:
-                        manifest_path = snapshot / "manifest.json"
-                        if preparation:
-                            manifest = _read(manifest_path)
-                            summaries = _prepared_summaries(preparation)
-                            for poi in manifest["pois"]:
-                                poi["summary"] = summaries[poi["id"]]
-                            manifest_path = temporary / "osmand-source.json"
-                            _write(manifest_path, manifest)
-                        manifest = _read(manifest_path)
-                        names = export_filenames(stage, manifest["routes"], target)
-                        receipts = record.setdefault("receipts", {}).setdefault(target, {})
-                        for number, route in enumerate(manifest["routes"]):
-                            naming = names[route["id"]]
-                            result = export_osmand(str(manifest_path), str(temporary / f"route-{number}"), str(route["id"]))
-                            receipt = Path(result["path"]) / "export.json"
-                            data = _read(receipt)
-                            renamed = []
-                            for filename in data["files"]:
-                                if filename in naming:
-                                    shutil.copyfile(receipt.parent / filename, output / naming[filename])
-                                    renamed.append(naming[filename])
-                            data["files"] = renamed
-                            data["source_manifest"] = str(snapshot / "manifest.json")
-                            data["source_manifest_sha256"] = _digest(snapshot / "manifest.json")
-                            data["preparation"] = state.get("preparation")
-                            receipts[str(route["id"])] = data
-                    inventory = _public_inventory(output)
-                    previous_inventory = record.setdefault("inventories", {}).get(target)
-                    if previous_inventory is not None and inventory != previous_inventory:
-                        raise ValueError("Stored export inventory differs from regenerated payload")
-                    record["inventories"][target] = inventory
-                    if not staged.exists():
-                        staged.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copytree(output, staged)
-                    _write(record_path, record)
+                        output = Path(name) / "payload"
+                        shutil.copytree(staged, output)
                     self._publish_output(stage, target, run_id, directory, record, state, output)
+                if staged.exists():
                     shutil.rmtree(staged)
             state["export"] = run_id
             self._save(stage, state)
-            return {"stage": stage, "run_id": run_id, "path": str(self.output_root),
-                    "record_path": str(record_path), "outputs": record["completed"]}
+        return {"stage": stage, "run_id": run_id, "path": str(self.output_root),
+                "record_path": str(record_path), "outputs": record["completed"]}
 

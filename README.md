@@ -26,7 +26,7 @@ python -m pip install -e .
 hexatrek status --format text
 ```
 
-The runtime dependency is `requests`, used for community refresh, session operations and optional model-generated summaries.
+Runtime dependencies are `requests` for network operations and Pillow for local photo compression.
 
 To try the exporter without app data, use the [synthetic example](examples/synthetic/README.md).
 
@@ -75,6 +75,25 @@ See [automatic summaries](docs/workflow.md#automatic-summaries) for hosted endpo
 Import the GPXs from `exports/komoot/stage-01/` into Komoot.
 Collection and export use local data; `summaries --generate` contacts the configured model.
 For current community reports, see [refresh](docs/workflow.md#2-refresh-community-reports-when-needed).
+
+To update an exported stage's comments and photos:
+
+```bash
+hexatrek update --stage 1 --session-file /private/session.json
+```
+
+The command retains its targets, language and photo mode.
+See [updates and review](docs/workflow.md#5-update-exported-stages) for changed summaries and interrupted runs.
+
+Keep a smaller private photo library with the default `med` preset:
+
+```bash
+hexatrek photos --stage 1 --photo-quality med
+```
+
+This compacts an existing library offline.
+For the first download, add `--session-file /private/session.json`.
+See [photo quality](docs/workflow.md#photo-quality-and-private-libraries) for `hi`, `med`, `lo` and update reuse.
 
 ## Guides
 

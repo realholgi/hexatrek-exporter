@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from hexatrek_exporter import hexatrek_refresh as refresh
+from hexatrek_exporter.photo_quality import compress_photo
 
 TOKEN = "existing.session.signature"
 TIME = "2026-11-15T10:00:00Z"
@@ -152,7 +153,7 @@ def test_complete_refresh_pins_snapshot_and_fetches_all_pages(monkeypatch, sourc
 
 
 @pytest.mark.parametrize("damage", [None, "truncated", "trailing"])
-def test_multi_picture_jpeg_is_preserved_only_with_complete_images(monkeypatch, source, renderer, damage):
+def test_multi_picture_jpeg_is_encoded_only_with_complete_images(monkeypatch, source, renderer, damage):
     # Two real 1x1 JPEGs with an MPF index, generated once using Pillow's MPO writer.
     data = zlib.decompress(base64.b64decode(
         "eJz7f+P/AwYBLzdPNwZGRgYGRiBk+P+IIcM3wI3B01OLgYOBgYGZgWEDOwMLkGVgaGDAuIEFpIiBCYSB4gpA2ogBBpgZHjMxoIBKIP84VEwBDfy/zeDMwMHGxs7GysHOzs7JycHFI8LLw83NIykkzC8iKyUvJyslI6OgoqeuoKSjLCOjYa6pY2BoYmIir25pa2Fko2dsYgQyhJGTk5OHm0eCl1fCSFFG0Yhk8P8AgyAHyPvMjEoMTIKMzIKM/48wyANDhJURDGDeYWRiZmFlY+fg5OIGKtgqwMDEyMzMxMLMysoCDCHGWqA8A4sgq5CioSObcGAiu1KhiFHjxIUcyk4bD4oGXfygYpxU1MTJJSYuISmlqqauoallYmpmbmFp5ezi6ubu4ekVHBIaFh4RGZWckpqWnpGZVVxSWlZeUVnV3NLa1t7R2TVp8pSp06bPmDlr0eIlS5ctX7Fy1abNW7Zu275j565Dh48cPXb8xMlTly5fuXrt+o2btx4+evzk6bPnL16++vjp85ev377/+PkL5C9GBmZGGMDqL0Ggv5hYWJhZ2EH+YmQqBykQZGFVNGQTcgxkTywUVjJq5BBxmrhw40FOZeOgD6JJRRe5xFRMHqp+BHkN7DPiPNZEls/gHkP46xYDDzMjMPKYBRnsGR69WNT1c/J34f83/2NL4qMJbzTh0SbhfTylsWh/oc3h/zcBLWmrvg=="
@@ -171,7 +172,8 @@ def test_multi_picture_jpeg_is_preserved_only_with_complete_images(monkeypatch, 
         manifest = json.loads(Path(result["manifest_path"]).read_text())
         photo = manifest["photos"][0]
         assert photo["path"].endswith(".jpg")
-        assert (source[1] / photo["path"]).read_bytes() == data
+        assert (source[1] / photo["path"]).read_bytes() == compress_photo(data)[0]
+        assert photo["source_sha256"] == hashlib.sha256(data).hexdigest()
         assert photo["comment_id"] == "new"
 
 
@@ -183,9 +185,11 @@ def test_exact_comment_photo_binding_and_content_hash(monkeypatch, source, rende
     assert result["photo_count"] == 2
     photos = manifest["photos"]
     assert [(photo["poi_id"], photo["comment_id"], photo["source_image"]) for photo in photos] == [("1:2:1000", "new", "photo space.png"), ("1:2:1000", "old", "other.png")]
-    digest = hashlib.sha256(data).hexdigest()
-    assert {photo["path"] for photo in photos} == {f"photos/{digest}.png"}
-    assert (source[1] / photos[0]["path"]).read_bytes() == data
+    encoded, metadata = compress_photo(data)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert {photo["path"] for photo in photos} == {f"photos/{digest}.jpg"}
+    assert (source[1] / photos[0]["path"]).read_bytes() == encoded
+    assert all(all(photo[key] == value for key, value in metadata.items()) for photo in photos)
     assert session.calls[1][1] == refresh._STORAGE_PREFIX + "comment%2F1000%2Fphoto%20space.png?alt=media"
     assert session.calls[1][2]["headers"] == {"Authorization": "Firebase " + TOKEN}
 
@@ -490,3 +494,347 @@ def test_photos_not_requested_skip_all_photo_requests(monkeypatch, source, rende
     assert renderer[0]["source"]["photos_coverage"] == "not-requested"
     assert len(session.calls) == 1
     assert not (source[1] / "photos").exists()
+
+
+@pytest.fixture
+def local_photo(source):
+    data = png()
+    digest = hashlib.sha256(data).hexdigest()
+    photo = {"poi_id": "1:2:1000", "comment_id": "new", "source_image": "p.png",
+             "path": f"photos/{digest}.png", "sha256": digest}
+    path = source[0].parent / photo["path"]
+    path.parent.mkdir()
+    path.write_bytes(data)
+    manifest = json.loads(source[0].read_text())
+    manifest["photos"] = [photo]
+    source[0].write_text(json.dumps(manifest))
+    return photo, path, data
+
+
+def forbid_media_gets(monkeypatch):
+    request = Session.request
+
+    def comments_only(self, method, url, **kwargs):
+        assert method != "GET" or "?alt=media" not in url, "Unchanged local photos must not be downloaded"
+        return request(self, method, url, **kwargs)
+
+    monkeypatch.setattr(Session, "request", comments_only)
+
+
+def test_files_reuse_verified_bytes_and_stable_metadata(monkeypatch, source, renderer, local_photo):
+    photo, path, data = local_photo
+    original = source[0].read_bytes()
+    forbid_media_gets(monkeypatch)
+    session = install_session(
+        monkeypatch, Response([document(images=["p.png"], text="Updated comment")]),
+        Response(photo_metadata(data)),
+    )
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files")
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    encoded, metadata = compress_photo(data)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert manifest["photos"] == [{**photo, "path": f"photos/{digest}.jpg", "sha256": digest, **metadata}]
+    assert manifest["pois"][0]["comments"][0]["text"] == "Updated comment"
+    assert result["photo_count"] == 1
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
+    assert (source[1] / manifest["photos"][0]["path"]).read_bytes() == encoded
+    assert path.read_bytes() == data
+    assert source[0].read_bytes() == original
+
+
+def test_files_remove_deleted_comments_and_photos(monkeypatch, source, renderer, local_photo):
+    photo, path, data = local_photo
+    original = source[0].read_bytes()
+    forbid_media_gets(monkeypatch)
+    install_session(monkeypatch, Response([]))
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files")
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    assert manifest["pois"][0]["comments"] == []
+    assert manifest["photos"] == []
+    assert result["photo_count"] == 0
+    assert not (source[1] / photo["path"]).exists()
+    assert path.read_bytes() == data
+    assert source[0].read_bytes() == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("poi_id", "1:2:2000"), ("comment_id", "deleted"), ("source_image", "replaced.png"),
+])
+def test_files_download_new_exact_identity(monkeypatch, source, renderer, local_photo, field, value):
+    photo, path, data = local_photo
+    manifest = json.loads(source[0].read_text())
+    manifest["photos"][0][field] = value
+    source[0].write_text(json.dumps(manifest))
+    original = source[0].read_bytes()
+    session = install_session(monkeypatch, Response([document(images=["p.png"])]), Response(data))
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files")
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    encoded, metadata = compress_photo(data)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert manifest["photos"] == [{**photo, "path": f"photos/{digest}.jpg", "sha256": digest, **metadata}]
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
+    assert path.read_bytes() == data
+    assert source[0].read_bytes() == original
+
+
+@pytest.mark.parametrize("damage", ["digest", "corrupt", "missing"])
+def test_files_reject_damaged_existing_photo_without_download(monkeypatch, source, renderer, local_photo, damage):
+    _photo, path, data = local_photo
+    manifest = json.loads(source[0].read_text())
+    if damage == "digest":
+        path.write_bytes(data + b"tampered")
+    elif damage == "corrupt":
+        path.write_bytes(data[:-1])
+        manifest["photos"][0]["sha256"] = hashlib.sha256(data[:-1]).hexdigest()
+        source[0].write_text(json.dumps(manifest))
+    else:
+        path.unlink()
+    original = source[0].read_bytes()
+    existing = path.read_bytes() if path.exists() else None
+    forbid_media_gets(monkeypatch)
+    install_session(monkeypatch, Response([document(images=["p.png"])]))
+    with pytest.raises(refresh.RefreshError):
+        refresh.refresh_pois(*map(str, source), photo_mode="files")
+    assert not source[1].exists()
+    assert not renderer
+    assert source[0].read_bytes() == original
+    assert (path.read_bytes() if path.exists() else None) == existing
+
+
+@pytest.mark.parametrize("unsafe", ["absolute", "parent", "file-symlink", "directory-symlink"])
+def test_files_reject_unsafe_source_photo_paths(monkeypatch, source, renderer, local_photo, unsafe):
+    photo, path, data = local_photo
+    manifest = json.loads(source[0].read_text())
+    root = source[0].parent
+    if unsafe == "absolute":
+        relative = str(path)
+    elif unsafe == "parent":
+        relative = "../" + root.name + "/" + photo["path"]
+    elif unsafe == "file-symlink":
+        alias = root / "alias.png"
+        alias.symlink_to(path)
+        relative = alias.name
+    else:
+        alias = root / "alias"
+        alias.symlink_to(path.parent, target_is_directory=True)
+        relative = alias.name + "/" + path.name
+    manifest["photos"][0]["path"] = relative
+    source[0].write_text(json.dumps(manifest))
+    original = source[0].read_bytes()
+    forbid_media_gets(monkeypatch)
+    install_session(monkeypatch, Response([document(images=["p.png"])]))
+    with pytest.raises(refresh.RefreshError):
+        refresh.refresh_pois(*map(str, source), photo_mode="files")
+    assert not source[1].exists()
+    assert not renderer
+    assert path.read_bytes() == data
+    assert source[0].read_bytes() == original
+
+
+def test_existing_files_do_not_replace_fresh_photo_links(monkeypatch, source, renderer, local_photo):
+    session = install_session(
+        monkeypatch, Response([document(images=["p.png"])]),
+        Response({"bucket": "hexatrek-44801.appspot.com", "name": "comment/1000/p.png",
+                  "downloadTokens": "fresh-token", "contentType": "image/png"}),
+    )
+    result = refresh.refresh_pois(*map(str, source), photo_mode="links")
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    assert manifest["photos"] == [
+        {"poi_id": "1:2:1000", "comment_id": "new", "source_image": "p.png",
+         "url": refresh._STORAGE_PREFIX + "comment%2F1000%2Fp.png?alt=media&token=fresh-token"}
+    ]
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
+
+
+def photo_metadata(data) -> dict:
+    return {"bucket": "hexatrek-44801.appspot.com", "name": "comment/1000/p.png",
+            "md5Hash": base64.b64encode(hashlib.md5(data, usedforsecurity=False).digest()).decode("ascii")}
+
+
+@pytest.mark.parametrize("md5", ["different", "missing", "malformed", "null"])
+def test_existing_identity_downloads_replaced_or_unversioned_photo(monkeypatch, source, renderer, local_photo, md5):
+    photo, path, original_data = local_photo
+    # A valid PNG with an additional ancillary chunk differs without recompressing its image.
+    body = b"Note\0updated"
+    chunk = (struct.pack(">I", len(body)) + b"tEXt" + body
+             + struct.pack(">I", zlib.crc32(b"tEXt" + body) & 0xffffffff))
+    data = original_data[:-12] + chunk + original_data[-12:]
+    metadata = photo_metadata(data)
+    if md5 == "missing":
+        del metadata["md5Hash"]
+    elif md5 == "malformed":
+        metadata["md5Hash"] = {"private": "private-body-secret"}
+    elif md5 == "null":
+        metadata["md5Hash"] = None
+    original_manifest = source[0].read_bytes()
+    session = install_session(
+        monkeypatch, Response([document(images=["p.png"])]), Response(metadata), Response(data),
+    )
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files")
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    encoded, encoding = compress_photo(data)
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert manifest["photos"] == [{**photo, "path": f"photos/{digest}.jpg", "sha256": digest, **encoding}]
+    assert (source[1] / manifest["photos"][0]["path"]).read_bytes() == encoded
+    assert [call[0] for call in session.calls] == ["POST", "GET", "GET"]
+    assert "?alt=media" not in session.calls[1][1]
+    assert session.calls[2][1].endswith("?alt=media")
+    assert path.read_bytes() == original_data
+    assert source[0].read_bytes() == original_manifest
+    assert "md5Hash" not in (source[1] / "manifest.json").read_text()
+
+
+@pytest.mark.parametrize("metadata", [
+    {"bucket": "private-body-secret", "name": "comment/1000/p.png"},
+    {"bucket": "hexatrek-44801.appspot.com", "name": "comment/1000/private-body-secret"},
+    {"error": {"message": "private-body-secret"}},
+    b"private-body-secret",
+])
+def test_existing_photo_metadata_fails_closed_without_private_body(monkeypatch, source, renderer, local_photo, metadata):
+    _photo, path, data = local_photo
+    original_manifest = source[0].read_bytes()
+    forbid_media_gets(monkeypatch)
+    session = install_session(monkeypatch, Response([document(images=["p.png"])]), Response(metadata))
+    with pytest.raises(refresh.RefreshError) as error:
+        refresh.refresh_pois(*map(str, source), photo_mode="files")
+    assert "private-body-secret" not in str(error.value)
+    assert TOKEN not in str(error.value)
+    assert [call[0] for call in session.calls] == ["POST", "GET"]
+    assert not source[1].exists()
+    assert not renderer
+    assert path.read_bytes() == data
+    assert source[0].read_bytes() == original_manifest
+
+
+@pytest.fixture
+def optimized_photo(source, local_photo):
+    photo, path, original = local_photo
+    data, metadata = compress_photo(original, "med")
+    digest = hashlib.sha256(data).hexdigest()
+    cached = {**photo, **metadata, "path": f"photos/{digest}.jpg", "sha256": digest}
+    (path.parent / f"{digest}.jpg").write_bytes(data)
+    manifest = json.loads(source[0].read_text())
+    manifest["photos"] = [cached]
+    source[0].write_text(json.dumps(manifest))
+    return cached, data, original
+
+
+@pytest.mark.parametrize("quality", ["med", "lo", "hi"])
+def test_optimized_original_md5_controls_reuse_and_quality(monkeypatch, source, renderer, optimized_photo, quality):
+    photo, data, original = optimized_photo
+    replies = [Response([document(images=["p.png"])]), Response(photo_metadata(original))]
+    if quality == "hi":
+        replies.append(Response(original))
+    else:
+        forbid_media_gets(monkeypatch)
+    session = install_session(monkeypatch, *replies)
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files", photo_quality=quality)
+    manifest = json.loads(Path(result["manifest_path"]).read_text())
+    updated = manifest["photos"][0]
+    assert updated["quality"] == quality
+    assert updated["source_md5"] == photo["source_md5"]
+    assert updated["source_sha256"] == photo["source_sha256"]
+    assert manifest["source"]["photo_quality"] == quality
+    assert len(session.calls) == (3 if quality == "hi" else 2)
+    if quality == "med":
+        assert updated == photo
+        assert (source[1] / updated["path"]).read_bytes() == data
+
+
+def test_optimized_changed_cloud_object_resets_original_fingerprints(monkeypatch, source, renderer, optimized_photo):
+    photo, _data, original = optimized_photo
+    body = b"Note\0new cloud object"
+    chunk = struct.pack(">I", len(body)) + b"tEXt" + body + struct.pack(">I", zlib.crc32(b"tEXt" + body) & 0xffffffff)
+    replacement = original[:-12] + chunk + original[-12:]
+    install_session(monkeypatch, Response([document(images=["p.png"])]),
+                    Response(photo_metadata(replacement)), Response(replacement))
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files")
+    updated = json.loads(Path(result["manifest_path"]).read_text())["photos"][0]
+    assert updated["source_sha256"] == hashlib.sha256(replacement).hexdigest()
+    assert updated["source_sha256"] != photo["source_sha256"]
+    assert updated["source_md5"] == photo_metadata(replacement)["md5Hash"]
+    assert updated["source_size_bytes"] == len(replacement)
+
+
+@pytest.mark.parametrize("mode,include", [("links", True), ("files", False)])
+def test_non_file_modes_never_encode(monkeypatch, source, renderer, mode, include):
+    monkeypatch.setattr(refresh, "compress_photo", lambda *args, **kwargs: pytest.fail("No photo encoding"))
+    replies = [Response([document(images=["p.png"])])]
+    if include:
+        replies.append(Response({**photo_metadata(png()), "downloadTokens": "public-token"}))
+    install_session(monkeypatch, *replies)
+    result = refresh.refresh_pois(*map(str, source), photo_mode=mode, include_photos=include)
+    assert "photo_quality" not in json.loads(Path(result["manifest_path"]).read_text())["source"]
+
+
+def secondary_cache(source, photo, data):
+    root = source[0].parent / "library"
+    root.mkdir()
+    (root / "photos").mkdir()
+    (root / photo["path"]).write_bytes(data)
+    manifest = {"schema_version": 1, "stage_id": 1, "source": {"photo_mode": "files"}, "photos": [photo]}
+    cache = root / "manifest.json"
+    cache.write_text(json.dumps(manifest))
+    inventory = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                 for path in root.rglob("*") if path.is_file()}
+    (root / "inventory.json").write_text(json.dumps(inventory))
+    return cache
+
+
+def test_secondary_library_serves_links_only_snapshot_without_media_download(monkeypatch, source, renderer, optimized_photo):
+    photo, data, original = optimized_photo
+    cache = secondary_cache(source, photo, data)
+    manifest = json.loads(source[0].read_text())
+    manifest["source"]["photo_mode"] = "links"
+    manifest["photos"] = [{"poi_id": photo["poi_id"], "comment_id": "new", "source_image": "p.png", "url": "https://example.invalid/photo"}]
+    source[0].write_text(json.dumps(manifest))
+    before = cache.read_bytes(), source[0].read_bytes()
+    forbid_media_gets(monkeypatch)
+    install_session(monkeypatch, Response([document(images=["p.png"])]), Response(photo_metadata(original)))
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files", photo_cache_path=str(cache))
+    exported = json.loads(Path(result["manifest_path"]).read_text())
+    assert exported["photos"] == [photo]
+    assert (source[1] / photo["path"]).read_bytes() == data
+    assert (cache.read_bytes(), source[0].read_bytes()) == before
+
+
+@pytest.mark.parametrize("damage", ["bytes", "forged"])
+def test_secondary_library_rejects_tampering_before_cloud(monkeypatch, source, renderer, optimized_photo, damage):
+    photo, data, _original = optimized_photo
+    cache = secondary_cache(source, photo, data)
+    if damage == "bytes":
+        (cache.parent / photo["path"]).write_bytes(b"tampered")
+    else:
+        manifest = json.loads(cache.read_text())
+        manifest["photos"][0]["source_md5"] = "forged"
+        cache.write_text(json.dumps(manifest))
+        inventory = json.loads((cache.parent / "inventory.json").read_text())
+        inventory["manifest.json"] = hashlib.sha256(cache.read_bytes()).hexdigest()
+        (cache.parent / "inventory.json").write_text(json.dumps(inventory))
+    monkeypatch.setattr(refresh.requests, "Session", lambda: pytest.fail("Invalid cache must precede network"))
+    with pytest.raises(refresh.RefreshError, match="photo cache"):
+        refresh.refresh_pois(*map(str, source), photo_mode="files", photo_cache_path=str(cache))
+    assert not source[1].exists()
+
+
+@pytest.mark.parametrize("fresh_location", ["snapshot", "library"])
+def test_fresh_original_is_reused_when_other_cache_is_stale(monkeypatch, source, renderer, optimized_photo, fresh_location):
+    old, encoded, original = optimized_photo
+    body = b"Note\0new original metadata"
+    chunk = struct.pack(">I", len(body)) + b"tEXt" + body + struct.pack(">I", zlib.crc32(b"tEXt" + body) & 0xffffffff)
+    replacement = original[:-12] + chunk + original[-12:]
+    current_data, metadata = compress_photo(replacement, "med")
+    current = {**old, **metadata, "sha256": hashlib.sha256(current_data).hexdigest()}
+    assert current_data == encoded
+    library_photo = current if fresh_location == "library" else old
+    primary_photo = current if fresh_location == "snapshot" else old
+    cache = secondary_cache(source, library_photo, encoded)
+    manifest = json.loads(source[0].read_text())
+    manifest["photos"] = [primary_photo]
+    source[0].write_text(json.dumps(manifest))
+    forbid_media_gets(monkeypatch)
+    install_session(monkeypatch, Response([document(images=["p.png"])]), Response(photo_metadata(replacement)))
+    result = refresh.refresh_pois(*map(str, source), photo_mode="files", photo_cache_path=str(cache))
+    exported = json.loads(Path(result["manifest_path"]).read_text())["photos"][0]
+    assert exported["source_md5"] == current["source_md5"]
+    assert exported["source_sha256"] == current["source_sha256"]

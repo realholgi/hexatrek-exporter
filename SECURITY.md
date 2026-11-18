@@ -12,7 +12,7 @@ Do not attach session files, source caches, GPXs, archives, photos or raw logs t
 
 ## Model credentials
 
-`summaries --generate` sends POI names, types, descriptions and report dates/text to your configured model endpoint.
+`summaries --generate` and `update --generate` send POI names, types, descriptions and report dates/text to your configured model endpoint.
 Separate author, link, photo and raw-record fields are omitted.
 No model request runs without `--generate`; matching cached text also needs no request.
 

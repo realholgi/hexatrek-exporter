@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -20,6 +21,7 @@ import zlib
 import requests
 
 from .hexatrek_session import FirebaseSession, SessionError
+from .photo_quality import can_reuse_photo, compress_photo, normalize_quality
 
 _QUERY_URL = "https://firestore.googleapis.com/v1/projects/hexatrek-44801/databases/(default)/documents:runQuery"
 _DOCUMENT_PREFIX = "projects/hexatrek-44801/databases/(default)/documents/Comment/"
@@ -78,8 +80,8 @@ def _request(session, method: str, url: str, token: str | FirebaseSession, *, pa
         raise RefreshError("Cloud request failed; no new export was published") from None
 
 
-def _photo_url(session, token: str | FirebaseSession, internal_id: int, image: str) -> str:
-    """Resolve an exact cloud object to its existing public download-token URL."""
+def _photo_metadata(session, token: str | FirebaseSession, internal_id: int, image: str) -> dict:
+    """Read metadata bound to the exact requested cloud object."""
     object_name = f"comment/{internal_id}/{image}"
     endpoint = _STORAGE_PREFIX + quote(object_name, safe="")
     try:
@@ -90,6 +92,13 @@ def _photo_url(session, token: str | FirebaseSession, internal_id: int, image: s
         raise RefreshError("Invalid cloud photo metadata") from None
     if not isinstance(metadata, dict) or metadata.get("bucket") != "hexatrek-44801.appspot.com" or metadata.get("name") != object_name:
         raise RefreshError("Cloud photo metadata does not match the exact requested object")
+    return metadata
+
+
+def _photo_url(session, token: str | FirebaseSession, internal_id: int, image: str) -> str:
+    """Resolve an exact cloud object to its existing public download-token URL."""
+    metadata = _photo_metadata(session, token, internal_id, image)
+    endpoint = _STORAGE_PREFIX + quote(f"comment/{internal_id}/{image}", safe="")
     tokens = metadata.get("downloadTokens")
     first_token = tokens.split(",", 1)[0] if isinstance(tokens, str) else ""
     if not first_token.strip():
@@ -307,13 +316,60 @@ def _dimensions(width, height):
     return 0 < width <= 20000 and 0 < height <= 20000 and width * height <= 40000000
 
 
-def refresh_pois(manifest_path: str, output_directory: str, token_file: str | None = None, include_photos: bool = True, *, session_file: str | None = None, photo_mode: str = "links") -> dict:
+def _local_photos(manifest):
+    photos = manifest.get("photos", [])
+    if not isinstance(photos, list):
+        raise RefreshError("Invalid source photo metadata")
+    indexed = {}
+    for photo in photos:
+        if not isinstance(photo, dict):
+            raise RefreshError("Invalid source photo metadata")
+        if "path" not in photo:
+            continue
+        identity = tuple(photo.get(key) for key in ("poi_id", "comment_id", "source_image"))
+        if not all(isinstance(value, str) and value for value in identity) or identity in indexed:
+            raise RefreshError("Invalid or duplicate source photo identity")
+        indexed[identity] = photo
+    return indexed
+
+
+def _read_local_photo(root: Path, photo) -> bytes:
+    relative = photo.get("path")
+    digest = photo.get("sha256")
+    if (not isinstance(relative, str) or "\\" in relative
+            or any(part in ("", ".", "..") for part in relative.split("/"))
+            or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        raise RefreshError("Invalid source photo path or digest")
+    try:
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parts = relative.split("/")
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_IMAGE_BYTES:
+                raise RefreshError("Invalid source photo file")
+            data = stream.read(_MAX_IMAGE_BYTES + 1)
+    except (OSError, ValueError):
+        raise RefreshError("Cannot safely read the source photo") from None
+    if len(data) > _MAX_IMAGE_BYTES or hashlib.sha256(data).hexdigest() != digest:
+        raise RefreshError("Source photo digest does not match its bytes")
+    return data
+
+
+def refresh_pois(manifest_path: str, output_directory: str, token_file: str | None = None, include_photos: bool = True, *, session_file: str | None = None, photo_mode: str = "links", photo_quality: str = "med", photo_cache_path: str | None = None) -> dict:
     """Fetch every POI's comments, optionally exact-bound photos, then publish a new export.
 
     Supply exactly one private raw ID-token file or persisted Firebase session.
     Persisted sessions renew their ID token before requests when needed.
-    Photos default to hosted links from exact-bound metadata; files mode downloads
-    and validates the original images for local archive consumers.
+    Photos default to hosted links from exact-bound metadata; files mode reuses
+    verified eligible photos and caches privacy-safe JPEGs at the selected quality.
     Any cloud, parsing or rendering failure leaves the source and destination alone.
     """
     if (token_file is None) == (session_file is None):
@@ -322,6 +378,11 @@ def refresh_pois(manifest_path: str, output_directory: str, token_file: str | No
         raise RefreshError("include_photos must be a boolean")
     if photo_mode not in ("links", "files"):
         raise RefreshError("photo_mode must be 'links' or 'files'")
+    if include_photos and photo_mode == "files":
+        try:
+            photo_quality = normalize_quality(photo_quality)
+        except ValueError as exc:
+            raise RefreshError(str(exc)) from None
     output = Path(output_directory).absolute()
     if output.exists() or output.is_symlink():
         raise RefreshError("Output directory must not already exist")
@@ -337,6 +398,29 @@ def refresh_pois(manifest_path: str, output_directory: str, token_file: str | No
     identities = [_identity(poi) for poi in manifest["pois"]]
     if len(set(identities)) != len(identities):
         raise RefreshError("Duplicate POI identities in source manifest")
+    local_photos = _local_photos(manifest) if include_photos and photo_mode == "files" else {}
+    source_root = Path(manifest_path).absolute().parent
+    cached_photos = {}
+    cache_root = source_root
+    if include_photos and photo_mode == "files" and photo_cache_path is not None:
+        from .workflow import _verify
+
+        cache_path = Path(photo_cache_path).absolute()
+        cache_root = cache_path.parent
+        try:
+            _verify(cache_root)
+            cached_manifest = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (not isinstance(cached_manifest, dict) or cached_manifest.get("schema_version") != 1
+                    or cached_manifest.get("stage_id") != manifest.get("stage_id")
+                    or not isinstance(cached_manifest.get("source"), dict)
+                    or cached_manifest["source"].get("photo_mode") != "files"):
+                raise ValueError("Invalid source photo cache manifest")
+            cached_photos = _local_photos(cached_manifest)
+            for cached in cached_photos.values():
+                _image_extension(_read_local_photo(cache_root, cached))
+                can_reuse_photo(cached, photo_quality)
+        except (OSError, ValueError, UnicodeError):
+            raise RefreshError("Cannot safely reuse the source photo cache") from None
     token = _read_token(token_file) if token_file is not None else None
     # Import at call time: exporter and refresher share the sole GPX renderer.
     from .hexatrek_export import write_manifest_export
@@ -350,6 +434,7 @@ def refresh_pois(manifest_path: str, output_directory: str, token_file: str | No
             session.trust_env = False  # no proxies, netrc or ambient credentials
             session.auth = None
             credentials = FirebaseSession(session_file, session) if session_file is not None else token
+            assert credentials is not None
             for poi in manifest["pois"]:
                 poi["comments"] = _comments(session, credentials, poi)
                 if include_photos:
@@ -359,22 +444,56 @@ def refresh_pois(manifest_path: str, output_directory: str, token_file: str | No
                                 url = _photo_url(session, credentials, poi["internal_id"], image)
                                 photos.append({"poi_id": poi["id"], "comment_id": comment["id"], "source_image": image, "url": url})
                                 continue
-                            object_name = f"comment/{poi['internal_id']}/{image}"
-                            url = _STORAGE_PREFIX + quote(object_name, safe="") + "?alt=media"
-                            data = _request(session, "GET", url, credentials, photo=True)
-                            extension = _image_extension(data)
+                            identity = (poi["id"], comment["id"], image)
+                            choices = [(cached_photos.get(identity), cache_root),
+                                       (local_photos.get(identity), source_root)]
+                            choices = [(photo, root) for photo, root in choices if photo is not None]
+                            choices.sort(key=lambda item: item[0].get("quality") != photo_quality)
+                            data = None
+                            reused = None
+                            verified = []
+                            for existing, existing_root in choices:
+                                local_data = _read_local_photo(existing_root, existing)
+                                _image_extension(local_data)
+                                md5 = existing.get("source_md5")
+                                if md5 is None:
+                                    md5 = base64.b64encode(hashlib.md5(local_data, usedforsecurity=False).digest()).decode("ascii")
+                                try:
+                                    eligible = can_reuse_photo(existing, photo_quality)
+                                except ValueError as exc:
+                                    raise RefreshError(str(exc)) from None
+                                verified.append((local_data, existing, md5, eligible))
+                            if verified:
+                                metadata = _photo_metadata(session, credentials, poi["internal_id"], image)
+                                for local_data, existing, md5, eligible in verified:
+                                    if metadata.get("md5Hash") == md5 and eligible:
+                                        data = local_data
+                                        reused = existing
+                                        break
+                            if data is None:
+                                object_name = f"comment/{poi['internal_id']}/{image}"
+                                url = _STORAGE_PREFIX + quote(object_name, safe="") + "?alt=media"
+                                data = _request(session, "GET", url, credentials, photo=True)
+                            _image_extension(data)
+                            try:
+                                data, encoding = compress_photo(data, photo_quality, existing=reused)
+                            except ValueError as exc:
+                                raise RefreshError(str(exc)) from None
                             digest = hashlib.sha256(data).hexdigest()
-                            filename = digest + extension
+                            filename = digest + ".jpg"
                             target = media / filename
                             if not target.exists():
                                 target.write_bytes(data)
-                            photos.append({"poi_id": poi["id"], "comment_id": comment["id"], "source_image": image, "path": "photos/" + filename, "sha256": digest})
+                            photos.append({"poi_id": poi["id"], "comment_id": comment["id"], "source_image": image, "path": "photos/" + filename, "sha256": digest, **encoding})
         manifest["photos"] = photos
         retrieved = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         manifest["source"]["comments_coverage"] = "cloud-complete"
         manifest["source"]["comments_retrieved_at"] = retrieved
         manifest["source"]["photos_coverage"] = "cloud-complete" if include_photos else "not-requested"
         manifest["source"]["photo_mode"] = photo_mode
+        manifest["source"].pop("photo_quality", None)
+        if include_photos and photo_mode == "files":
+            manifest["source"]["photo_quality"] = photo_quality
         manifest["exported_at"] = retrieved
         rendered = staging / "export"
         result = write_manifest_export(manifest, str(rendered))
