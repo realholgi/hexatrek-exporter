@@ -12,9 +12,11 @@ The exporter does not manage Komoot accounts or tours.
 
 ## Install
 
-Python 3.11 or later is required. Run these commands from the repository root:
+Python 3.11 or later is required:
 
 ```bash
+git clone https://github.com/realholgi/hexatrek-exporter.git
+cd hexatrek-exporter
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
@@ -63,6 +65,7 @@ Live cloud access and OsmAnd rendering require separate checks.
 
 CI tests Python 3.11 and 3.14 on Linux and macOS, then builds a wheel and checks the installed CLI.
 Use synthetic data for bug reports and tests.
+Report bugs in [GitHub Issues](https://github.com/realholgi/hexatrek-exporter/issues).
 Keep source data and exports out of Git and issue attachments.
 See [credential protection](SECURITY.md) for commit checks and exposure recovery.
 

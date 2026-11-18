@@ -10,6 +10,10 @@ dependencies = [
     "requests>=2.34.2,<3",
 ]
 
+[project.urls]
+Repository = "https://github.com/realholgi/hexatrek-exporter"
+Issues = "https://github.com/realholgi/hexatrek-exporter/issues"
+
 [project.scripts]
 hexatrek = "hexatrek_exporter.cli:main"
 
