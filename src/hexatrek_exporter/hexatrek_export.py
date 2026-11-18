@@ -451,6 +451,8 @@ def _french(value):
 
 
 def _integer(value, label):
+    if type(value) is float and value.is_integer() and -(2**63) <= value < 2**63:
+        return int(value)
     if type(value) is not int:
         raise CacheError(f"Invalid {label}")
     return value
@@ -539,7 +541,9 @@ def _build_manifest(documents, stage_id, source):
                                    'text': raw.get('text', ''), 'images': raw.get('images', []), 'raw': raw})
     pois = []
     for raw in sorted(raw_pois, key=lambda p: (p['stageId'], p['groupId'], p['internalId'])):
-        route_id, group_id, internal_id = raw['stageId'], raw['groupId'], raw['internalId']
+        route_id = _integer(raw['stageId'], 'point stageId')
+        group_id = _integer(raw['groupId'], 'point groupId')
+        internal_id = _integer(raw['internalId'], 'point internalId')
         if route_id not in route_by_id:
             raise CacheError(f"POI refers to uncached route {route_id}")
         type_id = raw.get('subCategory')

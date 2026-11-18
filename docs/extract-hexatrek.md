@@ -103,6 +103,7 @@ Multi-stage collection stops at the first error. Earlier successful stages remai
 
 The reader checks LevelDB checksums, record encoding, active-file selection and file changes during reading.
 It also rejects missing main-route points, duplicate source identities, invalid coordinates and ambiguous alternative metadata.
+Integer-valued Firestore doubles use exact integer IDs in exports. Raw source fields keep their original numeric representation.
 
 ## 5. Check coverage before relying on the export
 

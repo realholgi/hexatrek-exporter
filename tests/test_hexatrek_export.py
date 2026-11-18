@@ -34,6 +34,8 @@ def encoded_value(value):
         return pb(11, 0)
     if isinstance(value, str):
         return pb(17, value.encode())
+    if isinstance(value, bool):
+        return pb(1, int(value))
     if isinstance(value, int):
         return pb(2, value)
     if isinstance(value, float):
@@ -295,3 +297,41 @@ def test_unreadable_latest_document_cannot_fall_back_to_an_old_version(tmp_path)
     (cache / '000003.log').write_bytes(physical(payload))
     with pytest.raises(CacheError):
         load_documents(str(cache))
+
+
+def test_integer_valued_double_ids_keep_exact_identity_and_raw_source(tmp_path):
+    entries = stage_entries()
+    identity = 2026202698877653248
+    for name, fields in entries:
+        if name == 'TrekStageOfflineInterestPoint/a':
+            fields['interestPoints'][0].update(
+                internalId=float(identity), stageId=1.0, groupId=1.0)
+        elif name.startswith('Comment/'):
+            fields.update(trekStageInterestPointInternalId=float(identity),
+                          trekStageId=1.0, trekStageGroupId=1.0)
+    cache = cache_at(tmp_path, entries)
+    before = {path.name: path.read_bytes() for path in cache.iterdir()}
+    result = export_stage(str(cache), 1, str(tmp_path / 'export'))
+    manifest = json.loads(Path(result['manifest_path']).read_text())
+    target = next(poi for poi in manifest['pois'] if poi['internal_id'] == identity)
+    assert target['id'] == '1:1:2026202698877653248'
+    assert type(target['internal_id']) is int
+    assert type(target['group_id']) is int
+    assert type(target['stage_id']) is int
+    assert type(target['raw']['internalId']) is float
+    assert target['raw']['internalId'] == identity
+    assert len(target['comments']) == 2
+    assert {path.name: path.read_bytes() for path in cache.iterdir()} == before
+
+
+@pytest.mark.parametrize('identity', [1000.5, True, '1000', 1e20, float('nan'), float('inf')])
+def test_invalid_numeric_source_ids_are_rejected_without_output(tmp_path, identity):
+    entries = stage_entries()
+    for name, fields in entries:
+        if name == 'TrekStageOfflineInterestPoint/a':
+            fields['interestPoints'][0]['internalId'] = identity
+    cache = cache_at(tmp_path, entries)
+    output = tmp_path / 'export'
+    with pytest.raises(CacheError):
+        export_stage(str(cache), 1, str(output))
+    assert not output.exists()
