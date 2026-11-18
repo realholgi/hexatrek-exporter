@@ -1,29 +1,56 @@
 # hexatrek-exporter
 
+[![CI](https://github.com/realholgi/hexatrek-exporter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/realholgi/hexatrek-exporter/actions/workflows/ci.yml)
+
 Export HexaTrek stages, alternative routes, POIs and community reports for OsmAnd and Komoot.
 Keep original source data and full comments alongside the generated GPXs.
 
 Use the `hexatrek` CLI to collect downloaded sources, apply local summaries and write exports.
 It needs no model API key or Komoot credentials.
 
-Import the generated GPXs into Komoot manually.
-For file-based integrations, transfer `prepared.json` with its referenced GPXs and detail archives.
+- OsmAnd: navigation tracks, POIs and colored bivouac overlays.
+- Komoot: GPXs with concise POI text, split into sections when needed.
+
 The exporter does not manage Komoot accounts or tours.
 
 ## Install
 
-Python 3.11 or later is required:
+Python 3.11 or later on macOS or Linux is required:
 
 ```bash
 git clone https://github.com/realholgi/hexatrek-exporter.git
 cd hexatrek-exporter
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e .
 hexatrek status
 ```
 
 The runtime dependency is `requests`, used for explicitly requested community refresh and session operations.
+
+## Export a stage
+
+First, [copy the downloaded app cache](docs/extract-hexatrek.md).
+Point `--cache-path` at the copy's directory containing `CURRENT`.
+
+```bash
+hexatrek collect --stage 1 --cache-path /path/to/firestore-cache
+hexatrek export --stage 1 --target osmand
+hexatrek status --stage 1
+```
+
+Find the GPXs in `exports/osmand/stage-01/`.
+Main routes and alternatives remain separate.
+
+For Komoot, [prepare a summary file](docs/workflow.md#3-prepare-komoot-summaries), then run:
+
+```bash
+hexatrek prepare --stage 1 --summaries-file /path/to/stage-01-summaries.json
+hexatrek export --stage 1 --target komoot
+```
+
+Import the GPXs from `exports/komoot/stage-01/` into Komoot.
+These commands use local data. For current community reports, see [refresh](docs/workflow.md#2-refresh-community-reports-when-needed).
 
 ## Guides
 
