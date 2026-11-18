@@ -1,0 +1,49 @@
+# Local datasets, exports and working caches
+/data/
+/exports/
+/cache/
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# Credentials and local agent configuration
+.env
+.env.*
+!.env.example
+/.omp/
+*.pem
+*.key
+*.secret
+session.json
+*-session.json
+credentials.json
+service-account*.json
+*-credentials.json
+*_credentials.json
+*-session-*.json
+*_session.json
+*.p12
+*.pfx
+*.jks
+*.keystore
+/secrets/
+/credentials/
+
+# Graphify code-graph output
+graphify-out/
+
+# Local investigation output
+/hexatrek-*-evidence.json
+/hexatrek-session-access-result.json
+
+# macOS metadata
+.DS_Store
