@@ -23,10 +23,12 @@ cd hexatrek-exporter
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-hexatrek status
+hexatrek status --format text
 ```
 
 The runtime dependency is `requests`, used for explicitly requested community refresh and session operations.
+
+To try the exporter without app data, use the [synthetic example](examples/synthetic/README.md).
 
 ## Export a stage
 
@@ -36,16 +38,22 @@ Point `--cache-path` at the copy's directory containing `CURRENT`.
 ```bash
 hexatrek collect --stage 1 --cache-path /path/to/firestore-cache
 hexatrek export --stage 1 --target osmand
-hexatrek status --stage 1
+hexatrek status --stage 1 --format text
 ```
 
 Find the GPXs in `exports/osmand/stage-01/`.
 Main routes and alternatives remain separate.
 
-For Komoot, [prepare a summary file](docs/workflow.md#3-prepare-komoot-summaries), then run:
+For Komoot, generate an editable summary file from the active snapshot:
 
 ```bash
-hexatrek prepare --stage 1 --summaries-file /path/to/stage-01-summaries.json
+hexatrek summaries --stage 1 --output ./data/stage-01-summaries.json
+```
+
+Replace missing `null` entries with reviewed POI text, then prepare and export:
+
+```bash
+hexatrek prepare --stage 1 --summaries-file ./data/stage-01-summaries.json
 hexatrek export --stage 1 --target komoot
 ```
 
@@ -57,6 +65,7 @@ These commands use local data. For current community reports, see [refresh](docs
 | Guide | Contents |
 | --- | --- |
 | [Extract HexaTrek data](docs/extract-hexatrek.md) | Download stages in the app, copy the Firestore cache and check coverage |
+| [Synthetic example](examples/synthetic/README.md) | Run the offline workflow and inspect small sample GPXs |
 | [Local export workflow](docs/workflow.md) | Collect, refresh, prepare and export stages |
 | [Komoot-compatible exports](docs/komoot.md) | Prepared GPXs and local detail archives for an independent importer |
 | [Prepared artifact format](docs/prepared-artifacts.md) | Version 1 file handoff between independent projects |

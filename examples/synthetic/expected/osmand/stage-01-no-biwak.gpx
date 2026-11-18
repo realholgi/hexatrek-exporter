@@ -1,0 +1,30 @@
+<?xml version='1.0' encoding='utf-8'?>
+<gpx xmlns="http://www.topografix.com/GPX/1/1" xmlns:osmand="https://osmand.net/docs/technical/osmand-file-formats/osmand-gpx" version="1.1" creator="HexaTrek OsmAnd export"><metadata><name>Biwak verboten</name><desc>Aktualität nicht bestätigt. Kommentare und Fotos können fehlen.
+
+Biwakstatus nicht aktuell rechtlich überprüft.
+
+Grün bedeutet bedingt geduldet, nicht allgemeine Campingerlaubnis. Rot bedeutet verboten; Grau bedeutet unbekannt und ist keine Erlaubnis.
+
+Originalbedingungen der im gewählten Abschnitt vorkommenden Quellkategorien:
+
+Kategorie 101: Biwak bedingt geduldet
+[en] Synthetic tolerated category
+[en] Synthetic condition: imaginary bivouacs are conditionally tolerated. No real permission.
+
+Kategorie 201: Biwak verboten
+[en] Synthetic forbidden category
+[en] Synthetic condition: imaginary bivouacs are forbidden. No real location.</desc></metadata><trk><name>Biwak verboten</name><desc>Aktualität nicht bestätigt. Kommentare und Fotos können fehlen.
+
+Biwakstatus nicht aktuell rechtlich überprüft.
+
+Grün bedeutet bedingt geduldet, nicht allgemeine Campingerlaubnis. Rot bedeutet verboten; Grau bedeutet unbekannt und ist keine Erlaubnis.
+
+Originalbedingungen der im gewählten Abschnitt vorkommenden Quellkategorien:
+
+Kategorie 101: Biwak bedingt geduldet
+[en] Synthetic tolerated category
+[en] Synthetic condition: imaginary bivouacs are conditionally tolerated. No real permission.
+
+Kategorie 201: Biwak verboten
+[en] Synthetic forbidden category
+[en] Synthetic condition: imaginary bivouacs are forbidden. No real location.</desc><extensions><osmand:color>#d63131</osmand:color><osmand:coloring_type>solid</osmand:coloring_type><osmand:width>10</osmand:width><osmand:show_start_finish>false</osmand:show_start_finish></extensions><trkseg><trkpt lat="0.002" lon="0.0"><ele>12</ele></trkpt><trkpt lat="0.003" lon="0.0"><ele>13</ele></trkpt><trkpt lat="0.004" lon="0.0"><ele>14</ele></trkpt></trkseg></trk><extensions><osmand:color>#d63131</osmand:color><osmand:coloring_type>solid</osmand:coloring_type><osmand:width>10</osmand:width><osmand:show_start_finish>false</osmand:show_start_finish></extensions></gpx>

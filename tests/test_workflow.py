@@ -473,3 +473,55 @@ def test_no_file_reuses_old_recipe_even_without_cached_manifest_summaries(tmp_pa
 
     monkeypatch.setattr("hexatrek_exporter.preparation.prepare_export", forbidden)
     assert workflow.prepare(1) == prepared
+
+
+def test_summary_input_requires_a_snapshot_without_creating_storage(tmp_path):
+    workflow = Workflow(tmp_path / "data")
+    output = tmp_path / "draft.json"
+    with pytest.raises(ValueError, match="no snapshot"):
+        workflow.write_summaries(1, output)
+    assert not workflow.root.exists()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("location", ["snapshot", "stages", "exports"])
+def test_summary_input_cannot_change_managed_artifacts(tmp_path, source, location):
+    workflow = Workflow(tmp_path / "data")
+    adopted = workflow.adopt_snapshot(source)
+    stored = Path(adopted["manifest_path"])
+    destinations = {"snapshot": stored.parent, "stages": workflow.root / "stages",
+                    "exports": workflow.output_root}
+    output = destinations[location] / "draft.json"
+    before = stored.read_bytes()
+    with pytest.raises(ValueError, match="outside managed stages and public exports"):
+        workflow.write_summaries(1, output)
+    assert not output.exists()
+    assert stored.read_bytes() == before
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_summary_input_never_overwrites_existing_files_or_links(tmp_path, source, symlink):
+    workflow = Workflow(tmp_path / "data")
+    workflow.adopt_snapshot(source)
+    target = tmp_path / "notes.json"
+    target.write_text("Keep my edits")
+    output = tmp_path / "draft.json"
+    if symlink:
+        output.symlink_to(target)
+    else:
+        output.write_text("Keep my draft")
+    with pytest.raises(FileExistsError):
+        workflow.write_summaries(1, output)
+    assert target.read_text() == "Keep my edits"
+    assert output.read_text() == ("Keep my edits" if symlink else "Keep my draft")
+
+
+def test_summary_input_rejects_a_changed_stored_snapshot(tmp_path, source):
+    workflow = Workflow(tmp_path / "data")
+    adopted = workflow.adopt_snapshot(source)
+    stored = Path(adopted["manifest_path"])
+    stored.write_text(stored.read_text() + "\n")
+    output = tmp_path / "draft.json"
+    with pytest.raises(ValueError, match="Stored data changed"):
+        workflow.write_summaries(1, output)
+    assert not output.exists()

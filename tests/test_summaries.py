@@ -8,7 +8,7 @@ import pytest
 
 from hexatrek_exporter.poi_details import GPX
 from hexatrek_exporter.preparation import prepare_export
-from hexatrek_exporter.summaries import load_summaries
+from hexatrek_exporter.summaries import load_summaries, summary_document
 from hexatrek_exporter.text_limits import MAX_DESCRIPTION_UNITS, utf16_units
 
 
@@ -99,3 +99,87 @@ def test_supplied_text_can_replace_invalid_cached_text(tmp_path, source):
     summaries = tmp_path / "summaries.json"
     summaries.write_text(json.dumps(document(source, {"stable-poi": "Valid replacement"})))
     assert load_summaries(source, summaries)[1] == {"stable-poi": "Valid replacement"}
+
+
+def test_summary_document_preserves_bytes_text_and_first_route_use(source):
+    manifest = json.loads(source.read_text())
+    manifest["pois"] = [
+        {"id": "missing"},
+        {"id": "blank", "summary": ""},
+        {"id": "shared", "summary": "  Complete source text\n" + "😀" * 126},
+        {"id": "unrelated", "summary": "Unused"},
+    ]
+    manifest["routes"][0]["poi_ids"] = ["shared", "blank", "shared"]
+    manifest["routes"].append({"id": "alternative", "poi_ids": ["missing", "shared"]})
+    raw = (json.dumps(manifest, ensure_ascii=False, indent=3) + "\r\n").encode("utf-8")
+    source.write_bytes(raw)
+
+    result = summary_document(source)
+
+    assert result == {
+        "schema_version": 1,
+        "source_manifest_sha256": hashlib.sha256(raw).hexdigest(),
+        "summaries": {
+            "shared": manifest["pois"][2]["summary"],
+            "blank": "",
+            "missing": None,
+        },
+    }
+    assert list(result["summaries"]) == ["shared", "blank", "missing"]
+    assert source.read_bytes() == raw
+
+
+def test_summary_document_rejects_unknown_route_poi(source):
+    manifest = json.loads(source.read_text())
+    manifest["routes"][0]["poi_ids"].append("unknown")
+    source.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="Unknown route POI ID: unknown"):
+        summary_document(source)
+
+
+def test_summary_issues_include_cached_supplied_and_unknown_once(tmp_path, source):
+    manifest = json.loads(source.read_text())
+    manifest["pois"] = [
+        {"id": "missing-one"},
+        {"id": "missing-two"},
+        {"id": "cached-type", "summary": False},
+        {"id": "cached-xml", "summary": "\x00"},
+        {"id": "cached-long", "summary": "😀" * 126},
+        {"id": "supplied-route", "summary": "Valid cache"},
+        {"id": "replaced-cache", "summary": "\x00"},
+        {"id": "supplied-unused"},
+        {"id": "unused-cache", "summary": 123},
+    ]
+    used = [point["id"] for point in manifest["pois"][:7]]
+    manifest["routes"][0]["poi_ids"] = used + used
+    manifest["routes"].append({"id": "alternative", "poi_ids": used})
+    source.write_text(json.dumps(manifest))
+    supplied = {
+        "supplied-route": "\ud800" + "X" * 250,
+        "replaced-cache": "Valid replacement",
+        "supplied-unused": None,
+        "unknown-type": 123,
+        "unknown-valid": "Valid text",
+    }
+    summaries = tmp_path / "summaries.json"
+    summaries.write_text(json.dumps(document(source, supplied)))
+    before = source.read_bytes()
+
+    with pytest.raises(ValueError) as error:
+        load_summaries(source, summaries)
+
+    assert str(error.value).splitlines() == [
+        "Missing prepared summary for missing-one; supply a local summaries file",
+        "Missing prepared summary for missing-two; supply a local summaries file",
+        "Summary for cached-type must be a string",
+        "Summary for cached-xml must contain only valid XML 1.0 text",
+        "Summary for cached-long exceeds 250 UTF-16 units; it was not truncated",
+        "Summary for supplied-route must contain only valid XML 1.0 text",
+        "Summary for supplied-route exceeds 250 UTF-16 units; it was not truncated",
+        "Summary for supplied-unused must be a string",
+        "Unknown POI summary ID: unknown-type",
+        "Summary for unknown-type must be a string",
+        "Unknown POI summary ID: unknown-valid",
+    ]
+    assert source.read_bytes() == before

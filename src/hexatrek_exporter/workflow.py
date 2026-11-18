@@ -209,6 +209,28 @@ class Workflow:
             rows.append(row)
         return {"data_root": str(self.root), "exports_root": str(self.output_root), "stages": rows}
 
+    def write_summaries(self, stage, output_path):
+        """Write an editable summary input without changing the active snapshot."""
+        from .summaries import summary_document
+
+        self._snapshot(stage, self._state(stage))
+        destination = Path(output_path).expanduser().absolute()
+        resolved = destination.resolve()
+        if resolved.is_relative_to(self.root / "stages") or resolved.is_relative_to(self.output_root):
+            raise ValueError("Summary input must stay outside managed stages and public exports")
+        with self._lock(stage):
+            snapshot = self._snapshot(stage, self._state(stage))
+            _verify(snapshot)
+            document = summary_document(snapshot / "manifest.json")
+            payload = (json.dumps(document, indent=2, allow_nan=False) + "\n").encode("utf-8")
+            _verify(snapshot)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open("xb") as stream:
+                stream.write(payload)
+            texts = document["summaries"]
+            return {"stage": stage, "summaries_path": str(destination),
+                    "pois": len(texts), "missing": sum(text is None for text in texts.values())}
+
     def _snapshot(self, stage, state):
         if not state.get("snapshot"):
             raise ValueError(f"Stage {stage} has no snapshot; collect or adopt one first")

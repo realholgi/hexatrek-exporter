@@ -34,6 +34,11 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     status = commands.add_parser("status", help="show locally recorded stage state")
     status.add_argument("--stage", type=_stage, nargs="+")
+    status.add_argument("--format", choices=("text", "json"), default="json",
+                        help="status output format (default: json)")
+    summaries = commands.add_parser("summaries", help="write editable POI summary input")
+    summaries.add_argument("--stage", type=_stage, required=True)
+    summaries.add_argument("--output", type=Path, required=True)
     adopt = commands.add_parser("adopt", help="copy an existing source snapshot into storage")
     adopt.add_argument("--manifest", required=True)
     login = commands.add_parser("session-login", help="reuse or create a private anonymous session")
@@ -73,6 +78,8 @@ def _execute(args) -> dict:
         return workflow.status(args.stage)
     if args.command == "adopt":
         return workflow.adopt_snapshot(args.manifest)
+    if args.command == "summaries":
+        return workflow.write_summaries(args.stage, args.output)
     if args.command == "adopt-preparation":
         return workflow.adopt_preparation(args.stage, args.prepared_path)
     results = []
@@ -90,6 +97,35 @@ def _execute(args) -> dict:
     return {"stages": results}
 
 
+def _status_text(result: dict) -> str:
+    lines = [f"Data root: {result['data_root']}", f"Exports root: {result['exports_root']}"]
+    if not result["stages"]:
+        lines.append("No stages collected.")
+    for stage in result["stages"]:
+        lines.extend(("", f"Stage {stage['stage']:02d}"))
+        if "snapshot_path" in stage:
+            lines.append(f"  Snapshot: {stage['routes']} routes, {stage['pois']} POIs")
+            lines.append(f"  Snapshot path: {stage['snapshot_path']}")
+            if stage.get("comments_coverage") is not None:
+                lines.append(f"  Comments coverage: {stage['comments_coverage']}")
+            if stage.get("comments_retrieved_at") is not None:
+                lines.append(f"  Comments retrieved: {stage['comments_retrieved_at']}")
+        else:
+            lines.append("  Snapshot: missing")
+        if "preparation_path" in stage:
+            lines.append(f"  Preparation: available ({stage['preparation_path']})")
+        else:
+            lines.append("  Preparation: missing")
+        outputs = stage.get("outputs", {})
+        if outputs:
+            lines.append("  Visible exports:")
+            for target, path in outputs.items():
+                lines.append(f"    {target}: {path}")
+        else:
+            lines.append("  Visible exports: none")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -100,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"hexatrek: {exc}", file=sys.stderr)
         return 1
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.command == "status" and args.format == "text":
+        print(_status_text(result))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

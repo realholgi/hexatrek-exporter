@@ -10,6 +10,7 @@ repos:
           (?ix)(^|/)(data|exports|cache|secrets|credentials|\.omp|\.venv)/
           |(^|/)(\.env(?!\.example$)(\..+)?|(.*[-_])?session([-_].*)?\.json|(.*[-_])?credentials\.json|service-account[^/]*\.json)$
           |\.(pem|key|secret|p12|pfx|jks|keystore|gpx|zip|ldb|sst)$
+        exclude: ^examples/synthetic/(?:source/stage-01\.gpx|expected/(?:komoot/stage-01|osmand/stage-01(?:-biwak|-no-biwak)?)\.gpx)$
         stages: [pre-commit, manual]
   - repo: https://github.com/gitleaks/gitleaks
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1

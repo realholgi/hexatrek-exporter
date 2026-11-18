@@ -58,6 +58,12 @@ def test_cli_missing_manifest_is_stderr_failure(tmp_path, capsys):
     (["collect", "--stage", "abc", "--cache-path", "/not/read"], "positive integer"),
     (["export", "--stage", "1", "--target", "other"], "target"),
     (["prepare", "--stage", "1", "2", "--summaries-file", "/not/read"], "exactly one stage"),
+    (["summaries", "--stage", "0", "--output", "/not/written"], "positive integer"),
+    (["summaries", "--stage", "1"], "--output"),
+    (["summaries", "--stage", "1", "2", "--output", "/not/written"], "unrecognized arguments"),
+    (["status", "--format", "yaml"], "invalid choice"),
+    (["summaries", "--stage", "1", "--output", "/not/written", "--format", "text"],
+     "unrecognized arguments"),
 ])
 def test_cli_invalid_requests_never_construct_workflow(monkeypatch, capsys, arguments, expected):
     def forbidden(*args, **kwargs):
@@ -69,6 +75,140 @@ def test_cli_invalid_requests_never_construct_workflow(monkeypatch, capsys, argu
     captured = capsys.readouterr()
     assert captured.out == ""
     assert expected in captured.err
+
+
+def test_cli_summaries_for_uncollected_stage_fails_without_writing(tmp_path, capsys):
+    root = tmp_path / "data"
+    output = tmp_path / "summaries.json"
+    assert cli.main([
+        "--data-root", str(root), "summaries", "--stage", "7", "--output", str(output),
+    ]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Stage 7 has no snapshot" in captured.err
+    assert not output.exists()
+    assert not root.exists()
+
+
+def test_cli_generates_editable_summaries_without_overwriting_sources(tmp_path, source_manifest, capsys):
+    root = tmp_path / "data"
+    source_before = source_manifest.read_bytes()
+    assert cli.main(["--data-root", str(root), "adopt", "--manifest", str(source_manifest)]) == 0
+    adopted = json.loads(capsys.readouterr().out)
+    stored = Path(adopted["manifest_path"])
+    stored_before = stored.read_bytes()
+    output = tmp_path / "summaries.json"
+    arguments = ["--data-root", str(root), "summaries", "--stage", "1", "--output", str(output)]
+    assert cli.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    manifest = json.loads(stored_before)
+    assert json.loads(captured.out) == {
+        "stage": 1, "summaries_path": str(output.resolve()),
+        "pois": len(manifest["pois"]), "missing": len(manifest["pois"]),
+    }
+    template = json.loads(output.read_text())
+    assert template["source_manifest_sha256"] == hashlib.sha256(stored_before).hexdigest()
+    assert template["summaries"] == {poi["id"]: None for poi in manifest["pois"]}
+    template["summaries"] = {poi["id"]: "" for poi in manifest["pois"]}
+    output.write_text(json.dumps(template))
+    edited_before = output.read_bytes()
+    assert cli.main(arguments) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "hexatrek:" in captured.err
+    assert output.read_bytes() == edited_before
+    assert cli.main([
+        "--data-root", str(root), "prepare", "--stage", "1", "--summaries-file", str(output),
+    ]) == 0
+    assert len(json.loads(capsys.readouterr().out)["stages"]) == 1
+    assert source_manifest.read_bytes() == source_before
+    assert stored.read_bytes() == stored_before
+
+
+def test_cli_text_status_for_empty_and_uncollected_stages_has_no_effects(tmp_path, capsys):
+    root = tmp_path / "data"
+    arguments = ["--data-root", str(root), "status", "--format", "text"]
+    assert cli.main(arguments) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"Data root: {root}" in captured.out
+    assert f"Exports root: {tmp_path / 'exports'}" in captured.out
+    assert "No stages collected." in captured.out
+    assert not root.exists()
+    assert cli.main([*arguments, "--stage", "7"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Stage 07\n" in captured.out
+    assert "Snapshot: missing" in captured.out
+    assert "Preparation: missing" in captured.out
+    assert "Visible exports: none" in captured.out
+    assert not root.exists()
+    assert not (tmp_path / "exports").exists()
+
+
+def test_cli_status_reports_snapshot_preparation_and_only_visible_exports(
+    tmp_path, source_manifest, capsys,
+):
+    manifest = json.loads(source_manifest.read_text())
+    manifest["source"]["comments_retrieved_at"] = "2026-11-18T09:00:00Z"
+    source_manifest.write_text(json.dumps(manifest))
+    root = tmp_path / "data"
+    prefix = ["--data-root", str(root)]
+    assert cli.main([*prefix, "adopt", "--manifest", str(source_manifest)]) == 0
+    capsys.readouterr()
+    status_arguments = [*prefix, "status"]
+    assert cli.main(status_arguments) == 0
+    default_json = capsys.readouterr().out
+    assert cli.main([*status_arguments, "--format", "json"]) == 0
+    assert capsys.readouterr().out == default_json
+    snapshot_status = json.loads(default_json)
+    assert snapshot_status == cli.Workflow(root).status()
+    assert cli.main([*status_arguments, "--format", "text"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Stage 01\n" in captured.out
+    assert "Snapshot: 2 routes, 4 POIs" in captured.out
+    assert f"Comments coverage: {manifest['source']['comments_coverage']}" in captured.out
+    assert "Comments retrieved: 2026-11-18T09:00:00Z" in captured.out
+    assert "Preparation: missing" in captured.out
+    assert "Visible exports: none" in captured.out
+
+    summaries = tmp_path / "summaries.json"
+    assert cli.main([*prefix, "summaries", "--stage", "1", "--output", str(summaries)]) == 0
+    capsys.readouterr()
+    template = json.loads(summaries.read_text())
+    template["summaries"] = dict.fromkeys(template["summaries"], "")
+    summaries.write_text(json.dumps(template))
+    assert cli.main([
+        *prefix, "prepare", "--stage", "1", "--summaries-file", str(summaries),
+    ]) == 0
+    capsys.readouterr()
+    assert cli.main([*status_arguments, "--format", "text"]) == 0
+    captured = capsys.readouterr()
+    assert "Preparation: available (" in captured.out
+    assert "Visible exports: none" in captured.out
+
+    assert cli.main([*prefix, "export", "--stage", "1", "--target", "osmand"]) == 0
+    exported = json.loads(capsys.readouterr().out)["stages"][0]["result"]
+    public_path = exported["outputs"]["osmand"]
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert cli.main([*status_arguments, "--format", "text"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"    osmand: {public_path}" in captured.out
+    assert "komoot:" not in captured.out
+    assert "\x1b" not in captured.out
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+    stage_path = root / "stages" / "01" / "stage.json"
+    state = json.loads(stage_path.read_text())
+    state["visible_exports"] = {}
+    stage_path.write_text(json.dumps(state))
+    assert cli.main([*status_arguments, "--format", "text"]) == 0
+    captured = capsys.readouterr()
+    assert "Visible exports: none" in captured.out
+    assert public_path not in captured.out
 
 
 def test_cli_prepare_forwards_explicit_summary_file_synchronously(tmp_path, monkeypatch, capsys):

@@ -10,6 +10,15 @@ Its public output directory is always `PATH.parent/exports`.
 
 Use downloaded HexaTrek data that you are authorized to access.
 
+For readable stage counts, coverage, preparation state and output paths, run:
+
+```bash
+hexatrek status --stage 1 --format text
+```
+
+Status defaults to JSON. Use `--format text` for a terminal or `--format json` explicitly in scripts.
+For an offline trial without app data, follow the [synthetic example](../examples/synthetic/README.md).
+
 ## 1. Collect or adopt a source snapshot
 
 If you do not yet have a cache copy, follow [Extract downloaded HexaTrek data](extract-hexatrek.md) first.
@@ -77,25 +86,31 @@ When a matching preparation or usable POI summaries are already cached, run:
 hexatrek prepare --stage 1 2
 ```
 
-For missing or replacement summaries, supply a JSON file for one stage:
+For missing or replacement summaries, generate an input file for one stage:
 
 ```bash
-hexatrek prepare --stage 1 --summaries-file /path/to/stage-01-summaries.json
+hexatrek summaries --stage 1 --output ./data/stage-01-summaries.json
 ```
 
-Use `hexatrek status --stage 1` to find the active snapshot directory.
-Calculate the SHA-256 of that directory's exact `manifest.json` bytes:
+The command records the active snapshot's exact manifest hash and unique route POI IDs.
+It retains existing summaries and uses `null` for missing text.
+It leaves unrelated POIs out of the file.
+Existing output files, including symlinks, are not overwritten.
+Write drafts outside managed `data/stages/` and public `exports/` directories.
+
+Replace every `null` with reviewed text. An empty string deliberately leaves a description blank.
+Then prepare the stage:
 
 ```bash
-shasum -a 256 /path/to/snapshot/manifest.json
+hexatrek prepare --stage 1 --summaries-file ./data/stage-01-summaries.json
 ```
 
-Use that hash and the stable POI IDs from the manifest:
+The generated file uses this format after editing:
 
 ```json
 {
   "schema_version": 1,
-  "source_manifest_sha256": "<SHA-256 of the active snapshot manifest>",
+  "source_manifest_sha256": "<SHA-256 written by the summaries command>",
   "summaries": {
     "1:1:42": "Quelle\n2026-11-10: Wasser gemeldet, ungeprüft."
   }
@@ -107,8 +122,9 @@ The file can replace cached summaries or supply missing ones.
 Every route POI must have text after the supplied and cached summaries are combined.
 One summary file applies to one stage. Run separate commands when supplying files for several stages.
 
-Validation rejects a different source hash, unknown POI IDs, duplicate JSON keys,
-non-string values and descriptions longer than 250 UTF-16 units.
+Preparation reports all missing, unknown and invalid summaries together. Shared route POIs do not repeat the same error.
+Checks include text types, valid XML characters and the 250 UTF-16-unit limit.
+Malformed JSON, duplicate keys, unsupported schemas and mismatched source hashes stop validation before text checks.
 The exporter writes supplied text without truncation or translation.
 Review its factual content, language, dates, closures, water uncertainty and conflicting reports.
 

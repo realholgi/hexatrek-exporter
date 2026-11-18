@@ -8,6 +8,7 @@
 ├── src/hexatrek_exporter/       # CLI, source readers and export formats
 ├── tests/
 ├── docs/                      # Workflow, setup and destination guides
+├── examples/synthetic/        # Fictional source bundle and sample GPXs
 ├── data/                       # Private source data and workflow records
 │   ├── source-caches/          # Optional private copies of app databases
 │   ├── stages/01/
@@ -33,6 +34,7 @@
 The repository ignores `data/` and `exports/`. Back them up separately.
 Other storage locations need their own backup and version-control policy.
 Keep credentials outside snapshots and exports.
+The small GPXs in `examples/synthetic/` are tracked, fictional examples, separate from generated stage exports.
 
 The [extraction guide](extract-hexatrek.md) uses `data/source-caches/` for user-created database copies.
 Workflow commands do not manage those copies. Keep them separate from disposable `data/cache/` files.
