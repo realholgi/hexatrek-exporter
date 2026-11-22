@@ -201,9 +201,15 @@ def test_adopted_preparation_preserves_payloads_and_shared_archive(tmp_path, sou
     source_path = Path(snapshot["manifest_path"])
     legacy = tmp_path / "legacy-prepared"
     legacy.mkdir()
-    payloads = {"stage-1-part-1.gpx": b"first GPX payload",
-                "stage-1-part-2.gpx": b"second GPX payload",
-                "stage-1-details.zip": b"original archive including immutable source members"}
+    payloads = {
+        f"stage-1-part-{number}.gpx": (
+            f'<ns0:gpx xmlns:ns0="http://www.topografix.com/GPX/1/1" version="1.1" creator="test">'
+            f'<ns0:trk><ns0:name>Part {number}</ns0:name><ns0:trkseg>'
+            f'<ns0:trkpt lat="{number}" lon="0"/></ns0:trkseg></ns0:trk></ns0:gpx>'
+        ).encode()
+        for number in (1, 2)
+    }
+    payloads["stage-1-details.zip"] = b"original archive including immutable source members"
     for name, payload in payloads.items():
         (legacy / name).write_bytes(payload)
     prepared = {
@@ -230,9 +236,13 @@ def test_adopted_preparation_preserves_payloads_and_shared_archive(tmp_path, sou
     assert workflow.adopt_preparation(1, prepared_path) == first
     exported = workflow.export(1, ("komoot",))
     public = Path(exported["outputs"]["komoot"])
-    assert {path.name: path.read_bytes() for path in public.iterdir()} == {
-        "stage-01a.gpx": payloads["stage-1-part-1.gpx"],
-        "stage-01b.gpx": payloads["stage-1-part-2.gpx"]}
+    assert {path.name for path in public.iterdir()} == {"stage-01a.gpx", "stage-01b.gpx"}
+    for number, suffix in enumerate("ab", 1):
+        actual = (public / f"stage-01{suffix}.gpx").read_bytes()
+        assert b'<gpx xmlns="http://www.topografix.com/GPX/1/1"' in actual
+        assert b"<trkpt " in actual
+        assert ET.canonicalize(actual, rewrite_prefixes=True) == ET.canonicalize(
+            payloads[f"stage-1-part-{number}.gpx"], rewrite_prefixes=True)
 
 
 @pytest.mark.parametrize("extra", ["unexpected.gpx", "run.json", "details.zip", "directory"])

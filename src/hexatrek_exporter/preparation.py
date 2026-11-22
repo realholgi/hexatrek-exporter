@@ -22,6 +22,13 @@ from hexatrek_exporter.poi_details import (
 _MAX_POIS = 512
 
 
+def _komoot_gpx(tree):
+    # Komoot's importer can reject GPX 1.1 elements with an explicit prefix.
+    ET.register_namespace("", GPX)
+    ET.register_namespace("hexatrek", "urn:hexatrek-exporter:hexatrek:1")
+    return ET.tostring(tree, encoding="unicode", xml_declaration=True)
+
+
 def _sections(tree, identities):
     """Assign each waypoint once, in track order, without moving off-track POIs."""
     waypoints = tree.findall(f"{{{GPX}}}wpt")
@@ -174,7 +181,7 @@ def prepare_export(manifest_path, output_directory, summaries_file=None, *, incl
                                              if photo["poi_id"] in section_ids],
                            "pois": [dict(deepcopy(original_details[i]), id=j)
                                     for j, i in enumerate(ordinals)]}
-                prepared = {"gpx_content": ET.tostring(section, encoding="unicode", xml_declaration=True),
+                prepared = {"gpx_content": _komoot_gpx(section),
                             "details": details, "tour_description": tour_source_links(details)}
                 archive = details_bundle(prepared)
                 photos = []

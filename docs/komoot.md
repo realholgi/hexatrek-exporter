@@ -15,6 +15,9 @@ See the [version 1 artifact format](prepared-artifacts.md) for fields, limits an
 
 Public `exports/komoot/stage-NN/` directories contain GPXs only.
 They are suitable for manual import but are not a complete prepared-artifact directory.
+Komoot exports use GPX 1.1 as the default XML namespace.
+If an older export still uses prefixed GPX tags, run `hexatrek export --stage 5 --target komoot` for stage 5.
+The command reuses the active preparation and leaves the original files in the source snapshot unchanged.
 Keep full preparations under `data/`.
 
 ## Offline details

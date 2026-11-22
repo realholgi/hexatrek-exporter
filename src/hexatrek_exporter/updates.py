@@ -262,7 +262,7 @@ def update_stage(workflow, stage, *, session_file=None, photo_mode=None, targets
         raise ValueError("Publication already started; resume without replacement summaries")
     candidate = deepcopy(record["candidate_state"])
     candidate["visible_exports"] = deepcopy(workflow._state(stage).get("visible_exports", {}))
-    exported = workflow._export(stage, record["targets"], candidate)
+    exported = workflow._export(stage, record["targets"], candidate, run_id=candidate["export"])
     record["candidate_state"] = candidate
     record["outputs"] = exported["outputs"]
     record["status"] = "completed"

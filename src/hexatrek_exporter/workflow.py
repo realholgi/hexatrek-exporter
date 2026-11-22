@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 
 from .hexatrek_export import export_stage
 from .hexatrek_refresh import refresh_pois
@@ -616,7 +617,7 @@ class Workflow:
         with self._lock(stage):
             return self._export(stage, targets, self._state(stage))
 
-    def _export(self, stage, targets, state, *, publish=True):
+    def _export(self, stage, targets, state, *, publish=True, run_id=None):
         """Build all target payloads before entering recoverable publication."""
         targets = tuple(sorted(set(targets)))
         if not targets or set(targets) - {"osmand", "komoot"}:
@@ -629,9 +630,14 @@ class Workflow:
         include_photos = bool(state.get("osmand_photos")) and "osmand" in targets
         if include_photos:
             recipe["osmand_photos"] = True
-        run_id = _identity(recipe)
-        directory = self._destination(
-            stage, "exports", run_id, export_name(stage, targets, datetime.now(timezone.utc).isoformat()))
+        if "komoot" in targets:
+            recipe["komoot_gpx_format"] = 1
+        if run_id is None:
+            run_id = _identity(recipe)
+            directory = self._destination(
+                stage, "exports", run_id, export_name(stage, targets, datetime.now(timezone.utc).isoformat()))
+        else:
+            directory = self._artifact(stage, "exports", run_id)
         record_path = directory / "run.json"
         if directory.exists():
             record = _read(record_path)
@@ -677,6 +683,8 @@ class Workflow:
                     for filename in record["inventories"][target]:
                         shutil.copyfile(archived / filename, output / filename)
                 elif target == "komoot":
+                    from .preparation import _komoot_gpx
+
                     prepared = _read(preparation / "prepared.json")
                     source_routes = {str(route["id"]): route for route in _read(snapshot / "manifest.json")["routes"]}
                     for route in prepared["routes"]:
@@ -685,7 +693,12 @@ class Workflow:
                             route["kind"] = source_routes[source_id]["kind"]
                     names = export_filenames(stage, prepared["routes"], target)
                     for route in prepared["routes"]:
-                        shutil.copyfile(_file(preparation, route["gpx"]), output / names[route["id"]]["gpx"])
+                        source = _file(preparation, route["gpx"])
+                        destination = output / names[route["id"]]["gpx"]
+                        if "komoot_gpx_format" in record:
+                            destination.write_text(_komoot_gpx(ET.parse(source).getroot()), encoding="utf-8")
+                        else:
+                            shutil.copyfile(source, destination)
                 else:
                     manifest_path = snapshot / "manifest.json"
                     if preparation:
